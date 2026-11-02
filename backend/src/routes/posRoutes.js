@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { imprimirTicket } from "../services/printerService.js";
 import { guardarVenta, leerVentasDelDia } from "../services/posService.js";
+import { verSiguienteTicket } from "../services/contadorService.js";
 
 const router = Router();
 
@@ -22,11 +23,28 @@ function normalizarPagos(venta) {
   ];
 }
 
+// Valida un "YYYY-MM-DD" y devuelve el string o null.
+function parsearFechaQuery(q) {
+  if (typeof q !== "string") return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : null;
+}
+
+// ==================== GET /api/pos/siguiente-ticket ====================
+// Devuelve el próximo número (formateado) SIN reservarlo.
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
+router.get("/siguiente-ticket", (req, res) => {
+  try {
+    const fecha = parsearFechaQuery(req.query.fecha) || undefined;
+    const id = verSiguienteTicket(fecha);
+    res.json({ success: true, id });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ==================== POST /api/pos/venta ====================
 // Guarda la venta en el JSON del día y dispara la impresión.
-// La venta se guarda SIEMPRE primero. Si la impresión falla, la venta
-// no se pierde: devuelve impresion.success=false pero venta guardada.
-// Si el cliente manda el header X-Skip-Print: 1, no se imprime.
+// El ID secuencial lo asigna el backend atómicamente al guardar.
 router.post("/venta", async (req, res) => {
   try {
     const venta = req.body;
@@ -42,9 +60,11 @@ router.post("/venta", async (req, res) => {
         .json({ success: false, error: "El total de la venta es inválido" });
     }
 
-    const guardada = guardarVenta(venta);
+    // Si el cliente manda fecha en formato YYYY-MM-DD, respetamos ese
+    // archivo; si no, el service usa venta.fecha / hoy.
+    const fechaQuery = parsearFechaQuery(venta.fechaArchivo);
+    const guardada = guardarVenta(venta, fechaQuery);
 
-    // Si el cliente pidió no imprimir, no imprimimos
     const skipPrint = req.get("X-Skip-Print") === "1";
     if (skipPrint) {
       return res.json({
@@ -88,13 +108,11 @@ router.post("/cerrar-caja", (req, res) => {
     const { montoInicial, efectivoDeclarado } = req.body || {};
     const ventas = leerVentasDelDia();
 
-    // Total facturado (todos los medios)
     const totalVentas = ventas.reduce(
       (sum, v) => sum + (Number(v.total) || 0),
       0,
     );
 
-    // Total cobrado en efectivo (soporta pagos combinados)
     const totalEfectivo = ventas.reduce((sum, v) => {
       const pagos = normalizarPagos(v);
       return (
@@ -105,7 +123,6 @@ router.post("/cerrar-caja", (req, res) => {
       );
     }, 0);
 
-    // Cantidad de ventas que tuvieron al menos un pago en efectivo
     const cantidadVentasEfectivo = ventas.filter((v) =>
       normalizarPagos(v).some((p) => p.metodo === "Efectivo"),
     ).length;
@@ -136,10 +153,43 @@ router.post("/cerrar-caja", (req, res) => {
 });
 
 // ==================== GET /api/pos/ventas-hoy ====================
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
 router.get("/ventas-hoy", (req, res) => {
   try {
-    const ventas = leerVentasDelDia();
-    res.json({ success: true, total: ventas.length, ventas });
+    const fecha = parsearFechaQuery(req.query.fecha);
+    const ventas = leerVentasDelDia(fecha || new Date());
+    res.json({ success: true, total: ventas.length, ventas, fecha: fecha || null });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== GET /api/pos/resumen-dia ====================
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
+// Devuelve el agregado del día: total, cantidad, desglose por método.
+router.get("/resumen-dia", (req, res) => {
+  try {
+    const fecha = parsearFechaQuery(req.query.fecha);
+    const ventas = leerVentasDelDia(fecha || new Date());
+
+    const porMetodo = {};
+    let totalFacturado = 0;
+
+    for (const v of ventas) {
+      const pagos = normalizarPagos(v);
+      for (const p of pagos) {
+        porMetodo[p.metodo] = (porMetodo[p.metodo] || 0) + p.monto;
+        totalFacturado += p.monto;
+      }
+    }
+
+    res.json({
+      success: true,
+      fecha: fecha || new Date().toISOString().slice(0, 10),
+      cantidadVentas: ventas.length,
+      totalFacturado,
+      porMetodo,
+    });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

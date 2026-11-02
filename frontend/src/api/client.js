@@ -43,10 +43,18 @@ async function get(path) {
   return manejarRespuesta(res);
 }
 
+function conFecha(path, fecha) {
+  if (!fecha) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}fecha=${encodeURIComponent(fecha)}`;
+}
+
 export const api = {
   posVenta: (ticket, opts) => post("/pos/venta", ticket, opts),
   posCerrarCaja: (montoInicial, efectivoDeclarado) =>
     post("/pos/cerrar-caja", { montoInicial, efectivoDeclarado }),
-  posVentasHoy: () => get("/pos/ventas-hoy"),
-  posImprimir: (ticket) => post("/pos/imprimir", ticket), // <-- Para reimprimir
+  posVentasHoy: (fecha) => get(conFecha("/pos/ventas-hoy", fecha)),
+  posResumenDia: (fecha) => get(conFecha("/pos/resumen-dia", fecha)),
+  posSiguienteTicket: (fecha) => get(conFecha("/pos/siguiente-ticket", fecha)),
+  posImprimir: (ticket) => post("/pos/imprimir", ticket),
 };

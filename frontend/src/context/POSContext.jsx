@@ -1,4 +1,5 @@
 // src/context/POSContext.jsx
+// src/context/POSContext.jsx
 import {
   createContext,
   useContext,
@@ -272,17 +273,15 @@ export function POSProvider({ children }) {
   }, [state.items]);
 
   /**
-   * Construye el ticket con el CONTRATO NUEVO que espera el backend:
+   * Construye el ticket con el CONTRATO que espera el backend:
    *
-   *   { id, fecha, pagos[], metodoPago, total, totalPagado, vuelto, items[] }
+   *   { id: null, fecha, pagos[], metodoPago, total, totalPagado, vuelto, items[] }
    *
-   * `pagos` es [{ metodo: string, monto: number }, ...]. El backend
-   * (normalizarPagos en posRoutes.js / printerService.js) soporta tanto
-   * este contrato como el viejo, pero acá siempre mandamos el nuevo.
-   *
-   * `metodoPago` es un resumen legible: el nombre del método si hay uno
-   * solo, "Mixto" si hay varios. El backend lo ignora para los cálculos
-   * (usa pagos[]), pero sirve para logs y para el ticket.
+   * IMPORTANTE:
+   *   - `id` se manda null. El backend lo asigna atómicamente al
+   *     guardar (T-00001, T-00002, ...). No confiamos en IDs del front.
+   *   - `fecha` es ISO local; el backend usa `fechaArchivo` (YYYY-MM-DD)
+   *     para decidir el archivo del día si viene, si no usa la fecha.
    */
   const construirTicket = useCallback(
     (pagos = []) => {
@@ -305,9 +304,14 @@ export function POSProvider({ children }) {
             ? pagosNormalizados[0].metodo
             : 'Mixto';
 
+      const ahora = new Date();
+
       return {
-        id: `T-${Date.now()}`,
-        fecha: new Date().toISOString(),
+        id: null, // ← el backend lo asigna (T-00001, T-00002, ...)
+        fecha: ahora.toISOString(),
+        // YYYY-MM-DD en hora local, para que el backend guarde en el
+        // archivo del día correcto (no se desfasa por timezone).
+        fechaArchivo: ahora.toISOString().slice(0, 10),
         pagos: pagosNormalizados,
         metodoPago,
         total: totales.total,
