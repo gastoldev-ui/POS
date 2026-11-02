@@ -113,13 +113,15 @@ export default function PanelPOS() {
   };
 
   const enfocarCantidad = () => {
-    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto) return;
+    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto)
+      return;
     inputCantidadRef.current?.focus();
     inputCantidadRef.current?.select();
   };
 
   const enfocarPrecio = () => {
-    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto) return;
+    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto)
+      return;
     inputPrecioRef.current?.focus();
     inputPrecioRef.current?.select();
   };
@@ -212,6 +214,12 @@ export default function PanelPOS() {
   };
 
   const confirmarCargaYLimpiar = () => {
+    console.log(
+      "[confirmarCargaYLimpiar] cantidad actual:",
+      JSON.stringify(carga.cantidad),
+      "precio:",
+      JSON.stringify(carga.precio),
+    );
     const descripcionTipeada = busqueda.busqueda;
     const r = carga.confirmarCarga(descripcionTipeada);
     if (r.ok) {
