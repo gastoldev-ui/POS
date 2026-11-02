@@ -26,7 +26,8 @@ export function usePOSBusqueda(catalogo, maxResultados = 8) {
     if (!t) return [];
     return (catalogo || [])
       .filter((a) => {
-        const blob = `${a.nombre || ""} ${a.marca || ""} ${a.sku || ""}`.toLowerCase();
+        const blob =
+          `${a.nombre || ""} ${a.marca || ""} ${a.sku || ""}`.toLowerCase();
         return blob.includes(t);
       })
       .slice(0, maxResultados);
@@ -38,7 +39,9 @@ export function usePOSBusqueda(catalogo, maxResultados = 8) {
    */
   const buscarPorCodigo = useCallback(
     (codigo) => {
-      const t = String(codigo || "").trim().toLowerCase();
+      const t = String(codigo || "")
+        .trim()
+        .toLowerCase();
       if (!t) return null;
       return (
         (catalogo || []).find(
@@ -95,7 +98,7 @@ export function usePOSBusqueda(catalogo, maxResultados = 8) {
         }
         if (e.key === "Enter") {
           e.preventDefault();
-          const art = resultados[indiceDrop];
+          const art = resultados[indiceDrop] || resultados[0]; // <-- Fallback al primero
           return art ? { tipo: "seleccionar", art } : { tipo: "vacio" };
         }
         if (e.key === "Escape") {
@@ -106,9 +109,7 @@ export function usePOSBusqueda(catalogo, maxResultados = 8) {
       } else if (e.key === "Enter") {
         e.preventDefault();
         const art = buscarPorCodigo(busqueda);
-        return art
-          ? { tipo: "seleccionar", art }
-          : { tipo: "pasar-a-precio" };
+        return art ? { tipo: "seleccionar", art } : { tipo: "pasar-a-precio" };
       }
       return null;
     },

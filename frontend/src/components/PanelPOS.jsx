@@ -34,17 +34,15 @@ export default function PanelPOS() {
   const busqueda = usePOSBusqueda(CATALOGO_MOCK);
   const carga = usePOSCarga({
     onProducto: (art, cantidad, precio) => {
-      // La fila vacía es la última del array (invariante de POSContext).
       const filaVacia = pos.items.find((it) => it.vacia);
       if (filaVacia) {
         pos.agregarProducto(filaVacia.id, art, cantidad, precio);
       }
     },
-    onManual: (precio, descripcion) => {
-      pos.agregarManual(precio, descripcion);
+    onManual: (precio, descripcion, cantidad) => {
+      pos.agregarManual(precio, descripcion, cantidad); // <-- Pasamos la cantidad
     },
   });
-
   // Foco inicial en precio (carga rápida tipo teclado)
   useEffect(() => {
     const t = setTimeout(() => {
@@ -139,9 +137,17 @@ export default function PanelPOS() {
   const cerrarModalCobro = () => {
     setModalCobroAbierto(false);
     enterBloqueadoRef.current = true;
+
+    // Desbloquea el Enter residual
     setTimeout(() => {
       enterBloqueadoRef.current = false;
     }, 150);
+
+    // Devuelve el foco a Precio después de que el modal se desmonte
+    setTimeout(() => {
+      inputPrecioRef.current?.focus();
+      inputPrecioRef.current?.select();
+    }, 200); // 200ms da tiempo a React a limpiar el modal y a CobroModal a soltar el foco
   };
 
   const cerrarModalArqueo = () => {

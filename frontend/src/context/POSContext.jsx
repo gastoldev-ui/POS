@@ -6,7 +6,7 @@ import {
   useReducer,
   useCallback,
   useMemo,
-} from 'react';
+} from "react";
 
 function generarId() {
   return `pos_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -19,9 +19,9 @@ function redondear2(n) {
 function crearFilaVacia() {
   return {
     id: generarId(),
-    tipo: 'producto',
+    tipo: "producto",
     sku: null,
-    nombre: '',
+    nombre: "",
     cantidad: 1,
     precioUnitario: 0,
     subtotal: 0,
@@ -39,11 +39,16 @@ const estadoInicial = {
 
 function reducer(state, action) {
   switch (action.type) {
-    case 'AGREGAR_PRODUCTO': {
-      const { filaId, art, cantidad = 1, precioForzado = null } = action.payload;
+    case "AGREGAR_PRODUCTO": {
+      const {
+        filaId,
+        art,
+        cantidad = 1,
+        precioForzado = null,
+      } = action.payload;
       if (!art) return state;
 
-      const sku = String(art.sku || art.refId || art.id || '').trim();
+      const sku = String(art.sku || art.refId || art.id || "").trim();
       if (!sku) return state;
 
       const precioUnitario =
@@ -79,9 +84,9 @@ function reducer(state, action) {
         if (it.id !== filaId) return it;
         return {
           id: it.id,
-          tipo: 'producto',
+          tipo: "producto",
           sku,
-          nombre: String(art.nombre || 'Sin nombre'),
+          nombre: String(art.nombre || "Sin nombre"),
           cantidad: cant,
           precioUnitario: redondear2(precioUnitario),
           subtotal: redondear2(cant * precioUnitario),
@@ -96,20 +101,21 @@ function reducer(state, action) {
       return { ...state, items: [...nuevosItems, crearFilaVacia()] };
     }
 
-    case 'AGREGAR_MANUAL': {
-      const { monto = 0, descripcion = '' } = action.payload;
+    case "AGREGAR_MANUAL": {
+      const { monto = 0, descripcion = "", cantidad = 1 } = action.payload; // <-- Agregamos cantidad
       const precioUnitario = Number(monto) || 0;
+      const cant = Math.max(1, Math.floor(Number(cantidad) || 1));
 
       const nuevoItem = {
         id: generarId(),
-        tipo: 'manual',
+        tipo: "manual",
         sku: null,
         nombre:
           descripcion?.trim() ||
-          (precioUnitario > 0 ? 'Monto manual' : 'Art. Kiosco'),
-        cantidad: 1,
+          (precioUnitario > 0 ? "Monto manual" : "Art. Kiosco"),
+        cantidad: cant, // <-- Ahora usa la cantidad real
         precioUnitario,
-        subtotal: precioUnitario,
+        subtotal: redondear2(cant * precioUnitario), // <-- Y calcula el subtotal
         precioEditado: false,
         stock: null,
         imagen: null,
@@ -118,8 +124,7 @@ function reducer(state, action) {
       };
 
       const filasReales = state.items.filter((it) => !it.vacia);
-      const filaVacia =
-        state.items.find((it) => it.vacia) || crearFilaVacia();
+      const filaVacia = state.items.find((it) => it.vacia) || crearFilaVacia();
 
       return {
         ...state,
@@ -127,7 +132,7 @@ function reducer(state, action) {
       };
     }
 
-    case 'EDITAR_PRECIO': {
+    case "EDITAR_PRECIO": {
       const { id, nuevoPrecio } = action.payload;
       const precio = Number(nuevoPrecio);
       if (!Number.isFinite(precio) || precio < 0) return state;
@@ -148,7 +153,7 @@ function reducer(state, action) {
       };
     }
 
-    case 'EDITAR_CANTIDAD': {
+    case "EDITAR_CANTIDAD": {
       const { id, nuevaCantidad } = action.payload;
       const cant = Math.max(1, Math.floor(Number(nuevaCantidad) || 1));
 
@@ -166,19 +171,19 @@ function reducer(state, action) {
       };
     }
 
-    case 'EDITAR_NOMBRE': {
+    case "EDITAR_NOMBRE": {
       const { id, nuevoNombre } = action.payload;
       return {
         ...state,
         items: state.items.map((it) =>
           it.id === id
-            ? { ...it, nombre: String(nuevoNombre || '').trim() || it.nombre }
+            ? { ...it, nombre: String(nuevoNombre || "").trim() || it.nombre }
             : it,
         ),
       };
     }
 
-    case 'QUITAR': {
+    case "QUITAR": {
       const { id } = action.payload;
       const sinFila = state.items.filter((it) => it.id !== id);
       return {
@@ -187,7 +192,7 @@ function reducer(state, action) {
       };
     }
 
-    case 'QUITAR_ULTIMA': {
+    case "QUITAR_ULTIMA": {
       const filasReales = state.items.filter((it) => !it.vacia);
       if (filasReales.length === 0) return state;
 
@@ -198,10 +203,10 @@ function reducer(state, action) {
       };
     }
 
-    case 'VACIAR':
+    case "VACIAR":
       return { ...state, items: [crearFilaVacia()] };
 
-    case 'LIMPIAR_NUEVO': {
+    case "LIMPIAR_NUEVO": {
       const { id } = action.payload;
       return {
         ...state,
@@ -224,41 +229,47 @@ export function POSProvider({ children }) {
   const agregarProducto = useCallback(
     (filaId, art, cantidad = 1, precioForzado = null) => {
       dispatch({
-        type: 'AGREGAR_PRODUCTO',
+        type: "AGREGAR_PRODUCTO",
         payload: { filaId, art, cantidad, precioForzado },
       });
     },
     [],
   );
 
-  const agregarManual = useCallback((monto = 0, descripcion = '') => {
-    dispatch({ type: 'AGREGAR_MANUAL', payload: { monto, descripcion } });
-  }, []);
+  const agregarManual = useCallback(
+    (monto = 0, descripcion = "", cantidad = 1) => {
+      dispatch({
+        type: "AGREGAR_MANUAL",
+        payload: { monto, descripcion, cantidad },
+      });
+    },
+    [],
+  );
 
   const editarPrecio = useCallback((id, nuevoPrecio) => {
-    dispatch({ type: 'EDITAR_PRECIO', payload: { id, nuevoPrecio } });
+    dispatch({ type: "EDITAR_PRECIO", payload: { id, nuevoPrecio } });
   }, []);
 
   const editarCantidad = useCallback((id, nuevaCantidad) => {
-    dispatch({ type: 'EDITAR_CANTIDAD', payload: { id, nuevaCantidad } });
+    dispatch({ type: "EDITAR_CANTIDAD", payload: { id, nuevaCantidad } });
   }, []);
 
   const editarNombre = useCallback((id, nuevoNombre) => {
-    dispatch({ type: 'EDITAR_NOMBRE', payload: { id, nuevoNombre } });
+    dispatch({ type: "EDITAR_NOMBRE", payload: { id, nuevoNombre } });
   }, []);
 
   const quitarItem = useCallback((id) => {
-    dispatch({ type: 'QUITAR', payload: { id } });
+    dispatch({ type: "QUITAR", payload: { id } });
   }, []);
 
   const quitarUltima = useCallback(() => {
-    dispatch({ type: 'QUITAR_ULTIMA' });
+    dispatch({ type: "QUITAR_ULTIMA" });
   }, []);
 
-  const vaciar = useCallback(() => dispatch({ type: 'VACIAR' }), []);
+  const vaciar = useCallback(() => dispatch({ type: "VACIAR" }), []);
 
   const limpiarNuevo = useCallback((id) => {
-    dispatch({ type: 'LIMPIAR_NUEVO', payload: { id } });
+    dispatch({ type: "LIMPIAR_NUEVO", payload: { id } });
   }, []);
 
   const totales = useMemo(() => {
@@ -287,7 +298,7 @@ export function POSProvider({ children }) {
     (pagos = []) => {
       const pagosNormalizados = (Array.isArray(pagos) ? pagos : []).map(
         (p) => ({
-          metodo: String(p?.metodo || 'Efectivo'),
+          metodo: String(p?.metodo || "Efectivo"),
           monto: redondear2(p?.monto),
         }),
       );
@@ -299,10 +310,10 @@ export function POSProvider({ children }) {
 
       const metodoPago =
         pagosNormalizados.length === 0
-          ? 'Efectivo'
+          ? "Efectivo"
           : pagosNormalizados.length === 1
             ? pagosNormalizados[0].metodo
-            : 'Mixto';
+            : "Mixto";
 
       const ahora = new Date();
 
@@ -354,6 +365,6 @@ export function POSProvider({ children }) {
 
 export function usePOS() {
   const ctx = useContext(POSContext);
-  if (!ctx) throw new Error('usePOS debe usarse dentro de <POSProvider>');
+  if (!ctx) throw new Error("usePOS debe usarse dentro de <POSProvider>");
   return ctx;
 }

@@ -141,7 +141,7 @@ export function usePOSCarga({ onProducto, onManual }) {
         onProducto?.(artSeleccionado, cantNum, precioNum);
       } else {
         const desc = String(descripcionTipeada || "").trim() || "Art. Kiosco";
-        onManual?.(precioNum, desc);
+        onManual?.(precioNum, desc, cantNum); // <-- Agregamos cantNum como 3er parámetro
       }
 
       limpiar();
