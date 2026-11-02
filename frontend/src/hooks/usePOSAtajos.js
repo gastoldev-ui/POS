@@ -2,16 +2,9 @@
 import { useEffect } from "react";
 
 /**
- * ============================================================
  * ATAJOS DE TECLADO DEL POS
- * ============================================================
- *
  * Registra los atajos globales en fase CAPTURE (para que el navegador
- * no se robe F5/F10/etc) y expone un objeto `acciones` que los
- * botones del header pueden disparar con onClick.
- *
- * Responsabilidad ÚNICA: mapear tecla → acción. No sabe qué hace
- * cada acción, solo la invoca.
+ * no se robe F5/F10/etc).
  *
  * @param {object} opts
  * @param {Function} opts.onBuscar       F1
@@ -21,8 +14,6 @@ import { useEffect } from "react";
  * @param {Function} opts.onBorrarUltima F9
  * @param {Function} opts.onCobrar       F10
  * @param {boolean}  opts.activo         false → no registra nada
- *                                       (útil cuando hay un modal abierto
- *                                        que maneja sus propias teclas)
  */
 export function usePOSAtajos({
   onBuscar,
@@ -79,7 +70,6 @@ export function usePOSAtajos({
     activo,
   ]);
 
-  // Las acciones reusables por los botones
   return {
     buscar: () => onBuscar?.(),
     precio: () => onPrecio?.(),

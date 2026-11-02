@@ -10,6 +10,9 @@ import CobroModal from "./CobroModal";
 import ArqueoCajaModal from "./ArqueoCajaModal";
 import HistorialModal from "./HistorialModal";
 
+// Orden de navegación con ← → en la barra superior
+const CAMPOS_ORDEN = ["producto", "cantidad", "precio"];
+
 export default function PanelPOS() {
   const pos = usePOS();
 
@@ -20,6 +23,7 @@ export default function PanelPOS() {
 
   // Refs para foco
   const inputProductoRef = useRef(null);
+  const inputCantidadRef = useRef(null);
   const inputPrecioRef = useRef(null);
   const grillaRef = useRef(null);
 
@@ -51,17 +55,55 @@ export default function PanelPOS() {
   }, []);
 
   // Auto-scroll al fondo: la última fila siempre visible.
-  // Dep: el id de la última fila + cantidad de filas reales.
   const ultimaFilaId = pos.items[pos.items.length - 1]?.id;
   useEffect(() => {
     const el = grillaRef.current;
     if (!el) return;
-    // requestAnimationFrame para que el DOM ya tenga la nueva fila pintada.
     const raf = requestAnimationFrame(() => {
       el.scrollTop = el.scrollHeight;
     });
     return () => cancelAnimationFrame(raf);
   }, [ultimaFilaId, pos.totales.cantidadItems]);
+
+  // -------------------- Navegación ← → entre campos --------------------
+
+  const navegarCampo = (origen, direccion) => {
+    const idx = CAMPOS_ORDEN.indexOf(origen);
+    if (idx === -1) return;
+    const destinoIdx = Math.min(
+      CAMPOS_ORDEN.length - 1,
+      Math.max(0, idx + direccion),
+    );
+    const destino = CAMPOS_ORDEN[destinoIdx];
+
+    if (destino === "producto") {
+      inputProductoRef.current?.focus();
+      inputProductoRef.current?.select();
+    } else if (destino === "cantidad") {
+      inputCantidadRef.current?.focus();
+      inputCantidadRef.current?.select();
+    } else if (destino === "precio") {
+      inputPrecioRef.current?.focus();
+      inputPrecioRef.current?.select();
+    }
+  };
+
+  // Devuelve true si consumió la tecla (para que el caller haga return)
+  const handleFlechasCampo = (origen, e) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      navegarCampo(origen, -1);
+      return true;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      e.stopPropagation();
+      navegarCampo(origen, +1);
+      return true;
+    }
+    return false;
+  };
 
   // -------------------- Acciones reusables --------------------
 
@@ -70,8 +112,13 @@ export default function PanelPOS() {
     inputProductoRef.current?.select();
   };
 
+  const enfocarCantidad = () => {
+    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto) return;
+    inputCantidadRef.current?.focus();
+    inputCantidadRef.current?.select();
+  };
+
   const enfocarPrecio = () => {
-    // No robar el foco si hay un modal abierto: el modal maneja su propio foco.
     if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto) return;
     inputPrecioRef.current?.focus();
     inputPrecioRef.current?.select();
@@ -132,11 +179,34 @@ export default function PanelPOS() {
   };
 
   const handleProductoKeyDown = (e) => {
+    // ← / → navegan entre campos. ↑ / ↓ los maneja el dropdown.
+    if (handleFlechasCampo("producto", e)) return;
     const res = busqueda.handleKeyDown(e);
     if (!res) return;
     if (res.tipo === "seleccionar") {
       seleccionarProducto(res.art);
     } else if (res.tipo === "pasar-a-precio") {
+      enfocarPrecio();
+    }
+  };
+
+  const handleCantidadKeyDown = (e) => {
+    if (handleFlechasCampo("cantidad", e)) return;
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      carga.incrementarCantidad(1);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      carga.incrementarCantidad(-1);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
       enfocarPrecio();
     }
   };
@@ -151,6 +221,7 @@ export default function PanelPOS() {
   };
 
   const handlePrecioKeyDown = (e) => {
+    if (handleFlechasCampo("precio", e)) return;
     if (e.key === "Enter") {
       e.preventDefault();
       if (enterBloqueadoRef.current) return; // Frena el Enter residual
@@ -197,7 +268,7 @@ export default function PanelPOS() {
           </div>
         </div>
 
-        {/* Botones F1-F10 pastel (acción + atajo) */}
+        {/* Botones F1-F10 azul #51A2FF */}
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <AtajoBoton onClick={enfocarProducto} tecla="F1" label="Escanear" />
           <AtajoBoton onClick={enfocarPrecio} tecla="F2" label="Precio" />
@@ -227,7 +298,7 @@ export default function PanelPOS() {
               }}
               onKeyDown={handleProductoKeyDown}
               placeholder="Escanear o buscar..."
-              className="w-full text-base border-2 border-indigo-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+              className="w-full text-base border-2 border-indigo-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 h-[50px]"
             />
             {busqueda.dropAbierto && busqueda.resultados.length > 0 && (
               <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto">
@@ -259,31 +330,21 @@ export default function PanelPOS() {
             )}
           </div>
 
-          {/* Cantidad */}
+          {/* Cantidad (sin botones − / +, con ↑ ↓ y ← →) */}
           <div className="w-28 flex-shrink-0">
             <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
               Cant.
             </label>
-            <div className="flex items-center border-2 border-slate-300 rounded-lg overflow-hidden bg-white h-[50px]">
-              <button
-                onClick={() => carga.cambiarCantidad(carga.cantidad - 1)}
-                className="px-3 h-full text-slate-500 hover:bg-slate-100 bg-slate-50 font-bold text-base"
-              >
-                −
-              </button>
-              <input
-                type="number"
-                value={carga.cantidad}
-                onChange={(e) => carga.cambiarCantidad(e.target.value)}
-                className="w-full text-center text-lg font-bold bg-transparent border-0 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-              />
-              <button
-                onClick={() => carga.cambiarCantidad(carga.cantidad + 1)}
-                className="px-3 h-full text-slate-500 hover:bg-slate-100 bg-slate-50 font-bold text-base"
-              >
-                +
-              </button>
-            </div>
+            <input
+              ref={inputCantidadRef}
+              type="number"
+              min={1}
+              value={carga.cantidad}
+              onChange={(e) => carga.cambiarCantidad(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onKeyDown={handleCantidadKeyDown}
+              className="w-full text-center text-lg font-bold border-2 border-slate-300 rounded-lg bg-white h-[50px] px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            />
           </div>
 
           {/* Precio */}
@@ -427,7 +488,7 @@ export default function PanelPOS() {
         </table>
       </div>
 
-      {/* FOOTER: totales a la izquierda, COBRAR a la derecha (al lado del total) */}
+      {/* FOOTER: totales a la izquierda, COBRAR a la derecha */}
       <footer className="bg-white border-t-2 border-slate-300 px-4 py-3 flex items-center justify-between flex-shrink-0 shadow-[0_-4px_6px_-4px_rgba(0,0,0,0.1)]">
         <div className="flex gap-6 text-slate-600">
           <div>
@@ -483,17 +544,17 @@ export default function PanelPOS() {
 }
 
 /**
- * Botón pastel de atajo. Muestra la tecla (F1, F2, …) y la acción.
- * Reusable tanto para el header como para futuros footers.
+ * Botón pastel de atajo. Ahora azul #51A2FF sólido, texto blanco.
  */
 function AtajoBoton({ onClick, tecla, label }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-semibold bg-sky-100 hover:bg-sky-200 text-sky-800 border border-sky-200 rounded-lg transition-colors"
+      style={{ backgroundColor: "#51A2FF" }}
+      className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-semibold text-white border border-[#3a8be6] rounded-lg transition-colors hover:brightness-110 active:brightness-95 shadow-sm"
     >
-      <kbd className="text-[10px] font-mono bg-white/70 border border-sky-300 rounded px-1 py-0.5 text-sky-700">
+      <kbd className="text-[10px] font-mono bg-white/25 border border-white/40 rounded px-1 py-0.5 text-white">
         {tecla}
       </kbd>
       {label}
