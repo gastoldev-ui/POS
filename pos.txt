@@ -1,0 +1,4125 @@
+# PROYECTO: POS Dulce Reino
+# Ruta: /home/Damian/proyectos/POS
+# Fecha: 2026-11-02T22:23:47Z
+# ============================================
+
+```
+.
+├── backend
+│   ├── data
+│   │   └── pos
+│   │       └── ventas
+│   ├── src
+│   │   ├── routes
+│   │   │   └── posRoutes.js
+│   │   └── services
+│   │       ├── contadorService.js
+│   │       ├── posService.js
+│   │       └── printerService.js
+│   ├── .env.example
+│   ├── index.js
+│   ├── package.json
+│   └── pnpm-lock.yaml
+├── frontend
+│   ├── public
+│   │   ├── favicon.svg
+│   │   └── icons.svg
+│   ├── src
+│   │   ├── api
+│   │   │   └── client.js
+│   │   ├── assets
+│   │   │   ├── hero.png
+│   │   │   ├── react.svg
+│   │   │   └── vite.svg
+│   │   ├── components
+│   │   │   ├── ArqueoCajaModal.jsx
+│   │   │   ├── CobroModal.jsx
+│   │   │   ├── HistorialModal.jsx
+│   │   │   └── PanelPOS.jsx
+│   │   ├── context
+│   │   │   └── POSContext.jsx
+│   │   ├── hooks
+│   │   │   ├── usePOSAtajos.js
+│   │   │   ├── usePOSBusqueda.js
+│   │   │   └── usePOSCarga.js
+│   │   ├── mocks
+│   │   │   └── catalogoMock.js
+│   │   ├── services
+│   │   │   └── posApi.js
+│   │   ├── utils
+│   │   │   └── formateo.js
+│   │   ├── App.jsx
+│   │   ├── index.css
+│   │   └── main.jsx
+│   ├── eslint.config.js
+│   ├── .gitignore
+│   ├── index.html
+│   ├── package.json
+│   ├── pnpm-lock.yaml
+│   ├── postcss.config.js
+│   ├── README.md
+│   ├── tailwind.config.js
+│   └── vite.config.js
+├── dump.sh
+├── .gitignore
+└── start.sh
+
+19 directories, 40 files
+```
+
+## ARCHIVOS
+
+### `backend/.env.example`
+```example
+# backend/.env.example
+# ============================================================
+# POS Dulce Reino — Variables de entorno del backend
+# Copiar a backend/.env y ajustar.
+# ============================================================
+
+# Interfaz de la impresora térmica (node-thermal-printer).
+# Si NO se setea, el backend NO imprime (modo dev: skipped=true, la venta
+# igual se guarda). Formatos válidos según el driver:
+#   - USB Linux:  /dev/usb/lp0
+#   - TCP/IP:     tcp://192.168.1.50:9100
+#   - Serial:     /dev/ttyS0
+# Ejemplo:
+# PRINTER_INTERFACE=tcp://192.168.1.50:9100
+
+# (Opcional, hoy NO leído por el código — index.js tiene PORT=4000 hardcodeado)
+# PORT=4000
+
+```
+
+### `backend/index.js`
+```js
+// POS/backend/index.js
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import posRoutes from "./src/routes/posRoutes.js";
+
+dotenv.config();
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/pos", posRoutes);
+
+const PORT = 4000; // O el que quieras
+app.listen(PORT, () => {
+  console.log(`🚀 Backend POS en http://localhost:${PORT}`);
+});```
+
+### `backend/package.json`
+```json
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.16.1",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "node-thermal-printer": "^4.6.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+```
+
+### `backend/src/routes/posRoutes.js`
+```js
+// backend/src/routes/posRoutes.js
+import { Router } from "express";
+import { imprimirTicket } from "../services/printerService.js";
+import { guardarVenta, leerVentasDelDia } from "../services/posService.js";
+import { verSiguienteTicket } from "../services/contadorService.js";
+
+const router = Router();
+
+// Helper: normaliza los pagos de una venta a un array [{metodo, monto}]
+// Soporta el contrato nuevo (pagos[]) y el viejo (metodoPago + total).
+function normalizarPagos(venta) {
+  if (Array.isArray(venta.pagos) && venta.pagos.length > 0) {
+    return venta.pagos.map((p) => ({
+      metodo: String(p.metodo || "Efectivo"),
+      monto: Number(p.monto) || 0,
+    }));
+  }
+  return [
+    {
+      metodo: venta.metodoPago || "Efectivo",
+      monto: Number(venta.total) || 0,
+    },
+  ];
+}
+
+// Valida un "YYYY-MM-DD" y devuelve el string o null.
+function parsearFechaQuery(q) {
+  if (typeof q !== "string") return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : null;
+}
+
+// ==================== GET /api/pos/siguiente-ticket ====================
+// Devuelve el próximo número (formateado) SIN reservarlo.
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
+router.get("/siguiente-ticket", (req, res) => {
+  try {
+    const fecha = parsearFechaQuery(req.query.fecha) || undefined;
+    const id = verSiguienteTicket(fecha);
+    res.json({ success: true, id });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== POST /api/pos/venta ====================
+// Guarda la venta en el JSON del día y dispara la impresión.
+// El ID secuencial lo asigna el backend atómicamente al guardar.
+router.post("/venta", async (req, res) => {
+  try {
+    const venta = req.body;
+
+    if (!venta || !Array.isArray(venta.items) || venta.items.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "La venta no tiene ítems" });
+    }
+    if (!Number.isFinite(Number(venta.total)) || Number(venta.total) <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "El total de la venta es inválido" });
+    }
+
+    // Si el cliente manda fecha en formato YYYY-MM-DD, respetamos ese
+    // archivo; si no, el service usa venta.fecha / hoy.
+    const fechaQuery = parsearFechaQuery(venta.fechaArchivo);
+    const guardada = guardarVenta(venta, fechaQuery);
+
+    const skipPrint = req.get("X-Skip-Print") === "1";
+    if (skipPrint) {
+      return res.json({
+        success: true,
+        venta: guardada,
+        impresion: { success: true, skipped: true },
+      });
+    }
+
+    let impresion;
+    try {
+      impresion = await imprimirTicket(guardada);
+    } catch (e) {
+      impresion = { success: false, error: e.message };
+    }
+
+    res.json({ success: true, venta: guardada, impresion });
+  } catch (e) {
+    console.error("❌ [POS/venta]", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== POST /api/pos/imprimir ====================
+router.post("/imprimir", async (req, res) => {
+  try {
+    const resultado = await imprimirTicket(req.body);
+    if (resultado.success) {
+      res.json({ success: true });
+    } else {
+      res.status(500).json({ success: false, error: resultado.error });
+    }
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== POST /api/pos/cerrar-caja ====================
+router.post("/cerrar-caja", (req, res) => {
+  try {
+    const { montoInicial, efectivoDeclarado } = req.body || {};
+    const ventas = leerVentasDelDia();
+
+    const totalVentas = ventas.reduce(
+      (sum, v) => sum + (Number(v.total) || 0),
+      0,
+    );
+
+    const totalEfectivo = ventas.reduce((sum, v) => {
+      const pagos = normalizarPagos(v);
+      return (
+        sum +
+        pagos
+          .filter((p) => p.metodo === "Efectivo")
+          .reduce((s, p) => s + p.monto, 0)
+      );
+    }, 0);
+
+    const cantidadVentasEfectivo = ventas.filter((v) =>
+      normalizarPagos(v).some((p) => p.metodo === "Efectivo"),
+    ).length;
+
+    const inicial = Number(montoInicial) || 0;
+    const declarado = Number(efectivoDeclarado) || 0;
+    const esperadoEnCaja = inicial + totalEfectivo;
+    const diferencia = declarado - esperadoEnCaja;
+
+    res.json({
+      success: true,
+      resumen: {
+        fecha: new Date().toISOString().slice(0, 10),
+        cantidadVentas: ventas.length,
+        cantidadVentasEfectivo,
+        totalVentas,
+        totalEfectivo,
+        montoInicial: inicial,
+        esperadoEnCaja,
+        efectivoDeclarado: declarado,
+        diferencia,
+      },
+    });
+  } catch (e) {
+    console.error("❌ [POS/cerrar-caja]", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== GET /api/pos/ventas-hoy ====================
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
+router.get("/ventas-hoy", (req, res) => {
+  try {
+    const fecha = parsearFechaQuery(req.query.fecha);
+    const ventas = leerVentasDelDia(fecha || new Date());
+    res.json({ success: true, total: ventas.length, ventas, fecha: fecha || null });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== GET /api/pos/resumen-dia ====================
+// Query opcional: ?fecha=YYYY-MM-DD (default: hoy).
+// Devuelve el agregado del día: total, cantidad, desglose por método.
+router.get("/resumen-dia", (req, res) => {
+  try {
+    const fecha = parsearFechaQuery(req.query.fecha);
+    const ventas = leerVentasDelDia(fecha || new Date());
+
+    const porMetodo = {};
+    let totalFacturado = 0;
+
+    for (const v of ventas) {
+      const pagos = normalizarPagos(v);
+      for (const p of pagos) {
+        porMetodo[p.metodo] = (porMetodo[p.metodo] || 0) + p.monto;
+        totalFacturado += p.monto;
+      }
+    }
+
+    res.json({
+      success: true,
+      fecha: fecha || new Date().toISOString().slice(0, 10),
+      cantidadVentas: ventas.length,
+      totalFacturado,
+      porMetodo,
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+export default router;```
+
+### `backend/src/services/contadorService.js`
+```js
+// backend/src/services/contadorService.js
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const DATA_DIR = path.resolve(__dirname, '../../data/pos');
+const CONTADOR_PATH = path.join(DATA_DIR, 'contador.json');
+
+const PREFIJO = 'T-';
+const DIGITOS = 5;
+
+function fechaHoy() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function asegurarDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+function leerContadores() {
+  asegurarDir();
+  if (!fs.existsSync(CONTADOR_PATH)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(CONTADOR_PATH, 'utf-8'));
+  } catch {
+    // archivo corrupto → arrancamos de cero
+    return {};
+  }
+}
+
+function escribirContadores(obj) {
+  asegurarDir();
+  fs.writeFileSync(CONTADOR_PATH, JSON.stringify(obj, null, 2), 'utf-8');
+}
+
+/**
+ * Formatea un número entero a "T-00001".
+ */
+function formatear(n) {
+  return `${PREFIJO}${String(n).padStart(DIGITOS, '0')}`;
+}
+
+/**
+ * Devuelve el PRÓXIMO número (formateado) sin reservarlo.
+ * Útil para mostrar en la UI antes de cobrar.
+ */
+export function verSiguienteTicket(fecha = fechaHoy()) {
+  const contadores = leerContadores();
+  const actual = Number(contadores[fecha]) || 0;
+  return formatear(actual + 1);
+}
+
+/**
+ * Incrementa y RESERVA el siguiente número para la fecha dada.
+ * Devuelve el ID formateado. Es atómico a nivel de proceso (Node
+ * single-thread, pero igual escribimos antes de devolver para que
+ * un crash no deje el contador desfasado del archivo de ventas).
+ *
+ * IMPORTANTE: una vez reservado, el número NO se reutiliza aunque
+ * la impresión falle. La venta ya se persistió con ese ID.
+ */
+export function reservarSiguienteTicket(fecha = fechaHoy()) {
+  const contadores = leerContadores();
+  const actual = Number(contadores[fecha]) || 0;
+  const nuevo = actual + 1;
+  contadores[fecha] = nuevo;
+  escribirContadores(contadores);
+  return formatear(nuevo);
+}```
+
+### `backend/src/services/posService.js`
+```js
+// backend/src/services/posService.js
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { reservarSiguienteTicket } from './contadorService.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const VENTAS_DIR = path.resolve(__dirname, '../../data/pos/ventas');
+
+function obtenerRutaArchivo(fecha = new Date()) {
+  if (!fs.existsSync(VENTAS_DIR)) {
+    fs.mkdirSync(VENTAS_DIR, { recursive: true });
+  }
+  const fechaStr = fecha.toISOString().slice(0, 10); // YYYY-MM-DD
+  return path.join(VENTAS_DIR, `${fechaStr}.json`);
+}
+
+/**
+ * Parsea "YYYY-MM-DD" a un Date en UTC a mediodía, para que no se
+ * desplace por el timezone al hacer toISOString() de vuelta.
+ */
+function parsearFechaStr(fechaStr) {
+  if (!fechaStr) return new Date();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fechaStr);
+  if (!m) return new Date();
+  const [, y, mo, d] = m;
+  return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), 12, 0, 0));
+}
+
+/**
+ * Guarda una venta en el archivo del día.
+ * Asigna el ID secuencial atómicamente ANTES de escribir, si la venta
+ * no viene con uno ya asignado.
+ *
+ * @param {Object} venta
+ * @param {string} [fechaStr] - YYYY-MM-DD. Si no viene, usa la fecha
+ *                              interna de la venta (o hoy).
+ */
+export function guardarVenta(venta, fechaStr = null) {
+  const fecha = fechaStr ? parsearFechaStr(fechaStr) : new Date(venta.fecha || Date.now());
+  const fechaArchivo = fecha.toISOString().slice(0, 10);
+  const ruta = obtenerRutaArchivo(fecha);
+
+  let ventasDelDia = [];
+  if (fs.existsSync(ruta)) {
+    try {
+      ventasDelDia = JSON.parse(fs.readFileSync(ruta, 'utf-8'));
+    } catch {
+      /* archivo corrupto, empezamos de cero */
+    }
+  }
+
+  // El backend SIEMPRE asigna el ID secuencial (ignora el que mande el
+  // front). Así garantizamos unicidad y orden.
+  const idAsignado = reservarSiguienteTicket(fechaArchivo);
+  const ventaFinal = { ...venta, id: idAsignado };
+
+  ventasDelDia.push(ventaFinal);
+  fs.writeFileSync(ruta, JSON.stringify(ventasDelDia, null, 2), 'utf-8');
+  return ventaFinal;
+}
+
+/**
+ * Lee las ventas del día.
+ * @param {Date|string} [fecha=new Date()] - Date o "YYYY-MM-DD".
+ */
+export function leerVentasDelDia(fecha = new Date()) {
+  const fechaDate = typeof fecha === 'string' ? parsearFechaStr(fecha) : fecha;
+  const ruta = obtenerRutaArchivo(fechaDate);
+  if (!fs.existsSync(ruta)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(ruta, 'utf-8'));
+  } catch {
+    return [];
+  }
+}```
+
+### `backend/src/services/printerService.js`
+```js
+// backend/src/services/printerService.js
+import { printer as ThermalPrinter, types as PrinterTypes } from 'node-thermal-printer';
+
+/**
+ * Normaliza los pagos de un ticket a un array [{metodo, monto}].
+ * Soporta el contrato nuevo (pagos[]) y el viejo (metodoPago + total).
+ */
+function normalizarPagos(ticketData) {
+  if (Array.isArray(ticketData.pagos) && ticketData.pagos.length > 0) {
+    return ticketData.pagos.map((p) => ({
+      metodo: String(p.metodo || 'Efectivo'),
+      monto: Number(p.monto) || 0,
+    }));
+  }
+  return [
+    {
+      metodo: ticketData.metodoPago || 'Efectivo',
+      monto: Number(ticketData.total) || 0,
+    },
+  ];
+}
+
+/**
+ * Genera e imprime un ticket usando ESC/POS.
+ * @param {Object} ticketData - Datos del ticket (items, total, etc.)
+ * @returns {Promise<{success: boolean, skipped?: boolean, error?: string}>}
+ */
+export async function imprimirTicket(ticketData) {
+  try {
+    // ── Guard de desarrollo ──────────────────────────────────────────
+    // Si no hay PRINTER_INTERFACE seteada, no intentamos instanciar el
+    // driver: node-thermal-printer tira "No driver set!" y ensucia los
+    // logs. Devolvemos skipped=true para que el front sepa que no se
+    // imprimió, pero la venta YA está guardada por el caller.
+    if (!process.env.PRINTER_INTERFACE) {
+      console.log(
+        '🖨️  [printer] PRINTER_INTERFACE no seteada → skip impresión (modo dev)',
+      );
+      return {
+        success: true,
+        skipped: true,
+        error: 'Impresora no configurada (modo dev)',
+      };
+    }
+
+    // La construcción va DENTRO del try para que un fallo del driver
+    // no tire abajo el proceso del backend (evita el 502).
+    const printer = new ThermalPrinter({
+      type: PrinterTypes.EPSON, // o STAR, depende de tu impresora
+      interface: process.env.PRINTER_INTERFACE,
+      characterSet: 'PC850_MULTILINGUAL', // Para acentos y ñ
+      removeSpecialCharacters: false,
+      lineCharacter: '-',
+    });
+
+    const isConnected = await printer.isPrinterConnected();
+    if (!isConnected) {
+      return { success: false, error: 'Impresora no conectada' };
+    }
+
+    // --- Formato del ticket ---
+    printer.alignCenter();
+    printer.bold(true);
+    printer.println('DULCE REINO');
+    printer.bold(false);
+    printer.println('Ticket de Venta');
+    printer.drawLine();
+
+    printer.alignLeft();
+    printer.println(`Fecha: ${new Date(ticketData.fecha).toLocaleString('es-AR')}`);
+    printer.println(`Ticket #: ${ticketData.id}`);
+    printer.drawLine();
+
+    // Items
+    for (const item of ticketData.items) {
+      printer.println(item.nombre);
+      const lineaCantidadPrecio = `${item.cantidad} x $${item.precioUnitario.toFixed(2)}`;
+      printer.leftRight(lineaCantidadPrecio, `$${item.subtotal.toFixed(2)}`);
+    }
+
+    printer.drawLine();
+    printer.bold(true);
+    printer.leftRight('TOTAL', `$${ticketData.total.toFixed(2)}`);
+    printer.bold(false);
+
+    // --- Pagos (soporta uno o varios medios) ---
+    const pagos = normalizarPagos(ticketData);
+    printer.drawLine();
+    printer.println('PAGOS:');
+    for (const p of pagos) {
+      printer.leftRight(p.metodo, `$${p.monto.toFixed(2)}`);
+    }
+
+    // Vuelto: solo si lo pagado supera el total
+    const totalPagado = pagos.reduce((s, p) => s + p.monto, 0);
+    const vuelto = Math.max(0, totalPagado - Number(ticketData.total || 0));
+    if (vuelto > 0.001) {
+      printer.leftRight('Vuelto:', `$${vuelto.toFixed(2)}`);
+    }
+
+    printer.drawLine();
+    printer.alignCenter();
+    printer.println('¡Gracias por su compra!');
+    printer.newLine();
+    printer.newLine();
+    printer.cut();
+
+    await printer.execute();
+    return { success: true };
+  } catch (error) {
+    console.error('Error al imprimir:', error);
+    return { success: false, error: error.message };
+  }
+}```
+
+### `dump.sh`
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUTPUT_FILE="$SCRIPT_DIR/dump-pos.txt"
+
+ROOT="${1:-.}"
+cd "$ROOT"
+
+# Archivos que NUNCA deben aparecer en el dump (secretos + ruido)
+EXCLUIR_PATRONES=(
+  "*/node_modules/*"
+  "*/.git/*"
+  "*/dist/*"
+  "*/build/*"
+  "*/coverage/*"
+  "*/data/*"
+)
+
+# Archivos por nombre exacto que jamás se dumpean (secretos)
+EXCLUIR_NOMBRES=(
+  ".env"
+  ".env.local"
+  ".env.production"
+  "package-lock.json"
+  "pnpm-lock.yaml"
+  "yarn.lock"
+)
+
+# Tamaño máximo por archivo antes de truncar (en líneas)
+MAX_LINEAS=2000
+
+{
+  echo "# PROYECTO: POS Dulce Reino"
+  echo "# Ruta: $(pwd)"
+  echo "# Fecha: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  echo "# ============================================"
+  echo ""
+
+  echo "## ESTRUCTURA (sin node_modules/, sin dist/, sin backend/data/)"|
+  echo '```'
+  if command -v tree &>/dev/null; then
+    tree -a -I 'node_modules|.git|dist|build|backend/data|coverage|dump-pos.txt' --dirsfirst -L 4
+  else
+    # fallback: paths completos sin indentar
+        find . -type d \
+      ! -path "*/node_modules*" \
+      ! -path "*/.git*" \
+      ! -path "*/dist*" \
+      ! -path "*/build*" \
+      ! -path "*/backend/data*" \
+      ! -path "*/coverage*" \
+      | sort | sed 's|^\./||'
+  fi
+  echo '```'
+  echo ""
+
+  echo "## ARCHIVOS"
+  echo ""
+
+  # Construir la expresión de exclusión para find
+  FIND_EXCLUDE=()
+  for pat in "${EXCLUIR_PATRONES[@]}"; do
+    FIND_EXCLUDE+=(! -path "$pat")
+  done
+  for nom in "${EXCLUIR_NOMBRES[@]}"; do
+    FIND_EXCLUDE+=(! -name "$nom")
+  done
+
+  # 👇 ACÁ AGREGAMOS *.vue Y *.mjs
+  find . -type f \
+    \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \
+       -o -name "*.vue" -o -name "*.mjs" \
+       -o -name "*.json" -o -name "*.md" -o -name "*.css" -o -name "*.html" \
+       -o -name "*.example" -o -name "*.txt" -o -name "*.sh" \) \
+    "${FIND_EXCLUDE[@]}" \
+    ! -name "*.lock" \
+    ! -name "dump-*.txt" \
+    ! -name "*.log" \
+    ! -name "*.min.js" \
+    ! -name "*.min.css" \
+    | sort | while read -r file; do
+      rel="${file#./}"
+      ext="${file##*.}"
+      lineas_total=$(wc -l < "$file" 2>/dev/null || echo 0)
+
+      echo "### \`${rel}\`"
+      echo '```'"${ext}"
+
+      if [ "$lineas_total" -gt "$MAX_LINEAS" ]; then
+        head -n "$MAX_LINEAS" "$file"
+        echo ""
+        echo "... [TRUNCADO: ${lineas_total} líneas totales, mostrando ${MAX_LINEAS}] ..."
+      else
+        cat "$file"
+      fi
+
+      echo '```'
+      echo ""
+    done
+} > "$OUTPUT_FILE"
+
+echo "✅ Dump generado en: $OUTPUT_FILE"
+echo "   Líneas: $(wc -l < "$OUTPUT_FILE")"
+echo "   Tamaño: $(du -h "$OUTPUT_FILE" | cut -f1)"```
+
+### `frontend/eslint.config.js`
+```js
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{js,jsx}'],
+    extends: [
+      js.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      globals: globals.browser,
+      parserOptions: { ecmaFeatures: { jsx: true } },
+    },
+  },
+])
+```
+
+### `frontend/index.html`
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+```
+
+### `frontend/package.json`
+```json
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "autoprefixer": "^10.6.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "postcss": "^8.5.32",
+    "tailwindcss": "^3.4.19",
+    "vite": "^8.3.5"
+  }
+}
+```
+
+### `frontend/postcss.config.js`
+```js
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+```
+
+### `frontend/README.md`
+```md
+# React + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the ESLint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```
+
+### `frontend/src/api/client.js`
+```js
+// src/api/client.js
+const BASE = "/api"; // Vite lo redirige a http://localhost:4000 vía proxy
+
+export class ApiError extends Error {
+  constructor(message, status, body) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function manejarRespuesta(res) {
+  const contentType = res.headers.get("content-type") || "";
+  const esJson = contentType.includes("application/json");
+  const body = esJson
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => null);
+
+  if (!res.ok) {
+    const msg =
+      (body && body.error) || (body && body.message) || `HTTP ${res.status}`;
+    throw new ApiError(msg, res.status, body);
+  }
+  return body;
+}
+
+async function post(path, body, opts = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (opts.imprimir === false) {
+    headers["X-Skip-Print"] = "1";
+  }
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body ?? {}),
+  });
+  return manejarRespuesta(res);
+}
+
+async function get(path) {
+  const res = await fetch(`${BASE}${path}`);
+  return manejarRespuesta(res);
+}
+
+function conFecha(path, fecha) {
+  if (!fecha) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}fecha=${encodeURIComponent(fecha)}`;
+}
+
+export const api = {
+  posVenta: (ticket, opts) => post("/pos/venta", ticket, opts),
+  posCerrarCaja: (montoInicial, efectivoDeclarado) =>
+    post("/pos/cerrar-caja", { montoInicial, efectivoDeclarado }),
+  posVentasHoy: (fecha) => get(conFecha("/pos/ventas-hoy", fecha)),
+  posResumenDia: (fecha) => get(conFecha("/pos/resumen-dia", fecha)),
+  posSiguienteTicket: (fecha) => get(conFecha("/pos/siguiente-ticket", fecha)),
+  posImprimir: (ticket) => post("/pos/imprimir", ticket),
+};```
+
+### `frontend/src/App.jsx`
+```jsx
+// src/App.jsx
+import { POSProvider } from './context/POSContext';
+import PanelPOS from './components/PanelPOS';
+
+export default function App() {
+  return (
+    <POSProvider>
+      <PanelPOS />
+    </POSProvider>
+  );
+}```
+
+### `frontend/src/components/ArqueoCajaModal.jsx`
+```jsx
+// frontend/src/components/ArqueoCajaModal.jsx
+import { useState, useEffect, useRef } from "react";
+import { cerrarCaja } from "../services/posApi.js";
+import { formatearPrecio } from "../utils/formateo.js";
+
+/**
+ * ============================================================
+ * MODAL DE ARQUEO (F4)
+ * ============================================================
+ *
+ * Flujo keyboard-first:
+ *   PASO 1 "input":  dos inputs (montoInicial, efectivoDeclarado).
+ *                    Enter en el 1° → foco al 2°.
+ *                    Enter en el 2° → calcular.
+ *                    Esc → cerrar.
+ *   PASO 2 "resumen": muestra el resumen del backend.
+ *                    Enter → cerrar (modal entero).
+ *                    Esc   → volver a "input" SIN resetear montos
+ *                            (para corregir y recalcular).
+ *                    Botón "← Volver" idem Esc.
+ *
+ * El backend hace TODAS las cuentas (totalVentas, totalEfectivo,
+ * esperadoEnCaja, diferencia). El front solo muestra.
+ *
+ * Props:
+ *   - onCerrar()
+ */
+export default function ArqueoCajaModal({ onCerrar }) {
+  const [fase, setFase] = useState("input"); // "input" | "resumen"
+  const [montoInicial, setMontoInicial] = useState("");
+  const [efectivoDeclarado, setEfectivoDeclarado] = useState("");
+  const [calculando, setCalculando] = useState(false);
+  const [resumen, setResumen] = useState(null);
+  const [error, setError] = useState(null);
+
+  const inputInicialRef = useRef(null);
+  const inputDeclaradoRef = useRef(null);
+
+  // Foco inicial
+  useEffect(() => {
+    setTimeout(() => {
+      inputInicialRef.current?.focus();
+      inputInicialRef.current?.select();
+    }, 50);
+  }, []);
+
+  // ==================== CALCULAR ====================
+
+  const calcular = async () => {
+    setCalculando(true);
+    setError(null);
+    try {
+      const r = await cerrarCaja({
+        montoInicial: Number(montoInicial) || 0,
+        efectivoDeclarado: Number(efectivoDeclarado) || 0,
+      });
+      setResumen(r);
+      setFase("resumen");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCalculando(false);
+    }
+  };
+
+  // ==================== ATAJOS ====================
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (fase === "input" && !calculando) {
+          onCerrar?.();
+        } else if (fase === "resumen") {
+          setFase("input");
+        }
+        return;
+      }
+
+      if (fase === "resumen" && e.key === "Enter") {
+        e.preventDefault();
+        onCerrar?.();
+      }
+    };
+
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [fase, calculando, onCerrar]);
+
+  // ==================== HANDLERS INPUT ====================
+
+  const onInicialKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      inputDeclaradoRef.current?.focus();
+      inputDeclaradoRef.current?.select();
+    }
+  };
+
+  const onDeclaradoKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      calcular();
+    }
+  };
+
+  // ==================== RENDER ====================
+
+  return (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        {/* HEADER */}
+        <div className="bg-sky-600 p-4 text-center">
+          <h3 className="text-2xl font-black text-white">Arqueo de Caja</h3>
+          <p className="text-sky-100 text-xs mt-1">F4 · Cierre del día</p>
+        </div>
+
+        {fase === "input" && (
+          <div className="p-6 space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                Monto inicial en caja
+              </label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl font-bold">
+                  $
+                </span>
+                <input
+                  ref={inputInicialRef}
+                  type="number"
+                  inputMode="decimal"
+                  value={montoInicial}
+                  onChange={(e) => setMontoInicial(e.target.value)}
+                  onKeyDown={onInicialKeyDown}
+                  placeholder="0.00"
+                  className="w-full border-2 border-slate-300 rounded-xl pl-10 pr-4 py-3 text-xl font-bold text-right focus:ring-2 focus:ring-sky-500 focus:border-sky-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                Efectivo declarado
+              </label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl font-bold">
+                  $
+                </span>
+                <input
+                  ref={inputDeclaradoRef}
+                  type="number"
+                  inputMode="decimal"
+                  value={efectivoDeclarado}
+                  onChange={(e) => setEfectivoDeclarado(e.target.value)}
+                  onKeyDown={onDeclaradoKeyDown}
+                  placeholder="0.00"
+                  className="w-full border-2 border-slate-300 rounded-xl pl-10 pr-4 py-3 text-xl font-bold text-right focus:ring-2 focus:ring-sky-500 focus:border-sky-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+              </div>
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg p-2">
+                ⚠️ {error}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={onCerrar}
+                disabled={calculando}
+                className="flex-1 px-4 py-3 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-xl transition disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={calcular}
+                disabled={calculando}
+                className="flex-[2] bg-sky-600 hover:bg-sky-700 text-white font-black text-base py-3 rounded-xl transition disabled:opacity-50 shadow-lg"
+              >
+                {calculando ? "⏳ Calculando..." : "🧮 Calcular arqueo"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {fase === "resumen" && resumen && (
+          <div className="p-6 space-y-3">
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div className="bg-slate-50 rounded-lg p-2">
+                <p className="text-[10px] text-slate-500 uppercase">Ventas</p>
+                <p className="font-bold text-slate-800">
+                  {resumen.cantidadVentas}
+                </p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-2">
+                <p className="text-[10px] text-slate-500 uppercase">
+                  Ventas efectivo
+                </p>
+                <p className="font-bold text-slate-800">
+                  {resumen.cantidadVentasEfectivo}
+                </p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-2 col-span-2">
+                <p className="text-[10px] text-slate-500 uppercase">
+                  Total ventas
+                </p>
+                <p className="font-bold text-slate-800 text-base">
+                  {formatearPrecio(resumen.totalVentas)}
+                </p>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-2 col-span-2">
+                <p className="text-[10px] text-slate-500 uppercase">
+                  Total efectivo
+                </p>
+                <p className="font-bold text-slate-800 text-base">
+                  {formatearPrecio(resumen.totalEfectivo)}
+                </p>
+              </div>
+            </div>
+
+            <div className="border-t border-slate-200 pt-3 space-y-1.5 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-600">Monto inicial:</span>
+                <span className="font-semibold">
+                  {formatearPrecio(resumen.montoInicial)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Esperado en caja:</span>
+                <span className="font-semibold">
+                  {formatearPrecio(resumen.esperadoEnCaja)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-600">Efectivo declarado:</span>
+                <span className="font-semibold">
+                  {formatearPrecio(resumen.efectivoDeclarado)}
+                </span>
+              </div>
+            </div>
+
+            <div
+              className={`rounded-xl p-4 text-center border-2 ${
+                Math.abs(resumen.diferencia) < 0.01
+                  ? "bg-emerald-50 border-emerald-200"
+                  : resumen.diferencia > 0
+                    ? "bg-amber-50 border-amber-200"
+                    : "bg-red-50 border-red-200"
+              }`}
+            >
+              <p
+                className={`text-xs font-bold uppercase ${
+                  Math.abs(resumen.diferencia) < 0.01
+                    ? "text-emerald-700"
+                    : resumen.diferencia > 0
+                      ? "text-amber-700"
+                      : "text-red-700"
+                }`}
+              >
+                {Math.abs(resumen.diferencia) < 0.01
+                  ? "Caja cuadrada"
+                  : resumen.diferencia > 0
+                    ? "Sobra efectivo"
+                    : "Falta efectivo"}
+              </p>
+              <p
+                className={`text-3xl font-black ${
+                  Math.abs(resumen.diferencia) < 0.01
+                    ? "text-emerald-700"
+                    : resumen.diferencia > 0
+                      ? "text-amber-700"
+                      : "text-red-700"
+                }`}
+              >
+                {formatearPrecio(Math.abs(resumen.diferencia))}
+              </p>
+            </div>
+
+            <div className="flex gap-2 mt-2">
+              <button
+                type="button"
+                onClick={() => setFase("input")}
+                className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-3 rounded-xl transition"
+              >
+                ← Volver
+                <span className="block text-[10px] font-mono opacity-70 mt-0.5">
+                  (Esc)
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={onCerrar}
+                className="flex-[2] bg-sky-600 hover:bg-sky-700 text-white font-black text-base py-3 rounded-xl transition shadow-lg"
+              >
+                Cerrar (Enter)
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+### `frontend/src/components/CobroModal.jsx`
+```jsx
+// src/components/CobroModal.jsx
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { usePOS } from "../context/POSContext";
+import { api } from "../api/client";
+import { formatearPrecio } from "../utils/formateo";
+
+const METODOS = [
+  { key: "F5", nombre: "Efectivo", pideMonto: true, color: "emerald" },
+  { key: "F6", nombre: "Cta. DNI", pideMonto: false, color: "indigo" },
+  { key: "F7", nombre: "Débito", pideMonto: false, color: "sky" },
+  { key: "F8", nombre: "Transferencia", pideMonto: false, color: "violet" },
+];
+
+const METODO_POR_TECLA = Object.fromEntries(METODOS.map((m) => [m.key, m]));
+const METODO_DEFAULT = METODOS[0];
+
+function redondear2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+// Bloquea el keyup residual de una tecla que ya se manejó en keydown.
+// Se usa al cerrar el modal para que el Enter de "confirmar cobro"
+// no se filtre al POS de atrás.
+function bloquearKeyupResidual() {
+  const stop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener("keyup", stop, true);
+  window.addEventListener("keypress", stop, true);
+  setTimeout(() => {
+    window.removeEventListener("keyup", stop, true);
+    window.removeEventListener("keypress", stop, true);
+  }, 100);
+}
+
+export default function CobroModal({ onCerrar }) {
+  const pos = usePOS();
+
+  const [pagos, setPagos] = useState([]);
+  const [metodoActivo, setMetodoActivo] = useState(null);
+  const [montoTipeado, setMontoTipeado] = useState("");
+  // Fases: 'cobro' | 'confirmarPago' | 'elegirImpresion' | 'procesando' | 'exito'
+  const [fase, setFase] = useState("cobro");
+  const [error, setError] = useState(null);
+  // Selección del cartel de impresión: 0 = Imprimir (default), 1 = No imprimir
+  const [opcionImpresion, setOpcionImpresion] = useState(0);
+  const [resultadoExito, setResultadoExito] = useState(null);
+
+  const inputMontoRef = useRef(null);
+
+  const total = pos.totales.total;
+  const totalPagado = useMemo(
+    () => redondear2(pagos.reduce((s, p) => s + p.monto, 0)),
+    [pagos],
+  );
+  const restante = useMemo(
+    () => redondear2(total - totalPagado),
+    [total, totalPagado],
+  );
+  const estaCubierto = restante <= 0.001;
+
+  // Foco en el input de monto. Se dispara al elegir método (el input
+  // recién ahí se monta). Usamos requestAnimationFrame para garantizar
+  // que el DOM ya esté pintado, y un segundo intento por si otro
+  // setTimeout (ej. el `enfocarPrecio` de PanelPOS) nos pisa el foco.
+  useEffect(() => {
+    if (!metodoActivo) return;
+    const enfocar = () => {
+      inputMontoRef.current?.focus();
+      inputMontoRef.current?.select();
+    };
+    const raf = requestAnimationFrame(enfocar);
+    const t = setTimeout(enfocar, 80); // reintento tras el setTimeout(50) de PanelPOS
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+    };
+  }, [metodoActivo]);
+
+  // Auto-cierre del paso 'exito'
+  useEffect(() => {
+    if (fase !== "exito") return;
+    const t = setTimeout(() => onCerrar(), 1800);
+    return () => clearTimeout(t);
+  }, [fase, onCerrar]);
+
+  // -------------------- Acciones --------------------
+
+  const seleccionarMetodo = useCallback(
+    (metodo) => {
+      if (fase !== "cobro") return;
+      setError(null);
+
+      if (!metodo.pideMonto) {
+        if (restante <= 0) return;
+        const nuevosPagos = [
+          ...pagos,
+          { metodo: metodo.nombre, monto: restante },
+        ];
+        setPagos(nuevosPagos);
+        setMetodoActivo(null);
+        setMontoTipeado("");
+        const totalPagadoNuevo = redondear2(
+          nuevosPagos.reduce((s, p) => s + p.monto, 0),
+        );
+        if (totalPagadoNuevo >= total - 0.001) {
+          setFase("confirmarPago");
+        }
+        return;
+      }
+
+      setMetodoActivo(metodo);
+      setMontoTipeado("");
+    },
+    [fase, restante, pagos, total],
+  );
+
+  const confirmarMonto = useCallback(() => {
+    if (!metodoActivo) return;
+
+    // Si el campo está vacío, asumimos el restante (que es lo que muestra el placeholder).
+    // Esto permite cobrar el total con un solo Enter tras elegir Efectivo.
+    const montoTipeadoReal =
+      montoTipeado === "" ? restante : Number(montoTipeado);
+    const n = Number(montoTipeadoReal);
+
+    if (!Number.isFinite(n) || n <= 0) {
+      setError("Ingresá un monto válido");
+      return;
+    }
+    // Efectivo: se permite sobrepago (el vuelto se muestra en confirmarPago).
+    // Otros métodos: no pueden superar el restante.
+    if (metodoActivo.nombre !== "Efectivo" && n > restante + 0.001) {
+      setError(`El monto supera el restante (${formatearPrecio(restante)})`);
+      return;
+    }
+
+    const nuevoPago = { metodo: metodoActivo.nombre, monto: redondear2(n) };
+    const nuevosPagos = [...pagos, nuevoPago];
+    const totalPagadoNuevo = redondear2(
+      nuevosPagos.reduce((s, p) => s + p.monto, 0),
+    );
+    const cubierto = totalPagadoNuevo >= total - 0.001;
+
+    setPagos(nuevosPagos);
+    setMetodoActivo(null);
+    setMontoTipeado("");
+    setError(null);
+
+    if (cubierto) {
+      setFase("confirmarPago");
+    }
+  }, [metodoActivo, montoTipeado, restante, pagos, total]);
+
+  const quitarPago = useCallback(
+    (idx) => {
+      if (fase !== "cobro") return;
+      setPagos((prev) => prev.filter((_, i) => i !== idx));
+      setError(null);
+    },
+    [fase],
+  );
+
+  const volverACobro = useCallback(() => {
+    setFase("cobro");
+    setError(null);
+  }, []);
+
+  const irAConfirmarPago = useCallback(() => {
+    if (!estaCubierto) {
+      setError(`Falta cubrir ${formatearPrecio(restante)}`);
+      return;
+    }
+    setFase("confirmarPago");
+  }, [estaCubierto, restante]);
+
+  const irAElegirImpresion = useCallback(() => {
+    setOpcionImpresion(0); // default: imprimir
+    setFase("elegirImpresion");
+    setError(null);
+  }, []);
+
+  // -------------------- Confirmación final --------------------
+
+  const confirmarCobro = useCallback(
+    async (debeImprimir) => {
+      setFase("procesando");
+      setError(null);
+      try {
+        const ticket = pos.construirTicket(pagos);
+        const data = await api.posVenta(ticket, { imprimir: debeImprimir });
+
+        // Guardamos el resultado para mostrarlo en la pantalla de éxito
+        setResultadoExito({
+          debeImprimir,
+          impresion: data.impresion || null,
+          total: ticket.total,
+        });
+        setFase("exito");
+        // El vaciado del carrito se hace recién al cerrar (o podés hacerlo acá)
+        pos.vaciar();
+        // Evitamos que el keyup/keypress de la tecla que disparó esto
+        // se escape al POS de atrás.
+        bloquearKeyupResidual();
+      } catch (err) {
+        setError(err.message);
+        setFase("cobro");
+      }
+    },
+    [pagos, pos],
+  );
+
+  // -------------------- Teclado --------------------
+
+  useEffect(() => {
+    const handler = (e) => {
+      // Bloquear teclas del navegador
+      if (["F5", "F6", "F7", "F8"].includes(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      // --- Fase éxito: Enter/click cierra; auto-cierre por timeout ---
+      if (fase === "exito") {
+        if (e.key === "Enter" || e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          bloquearKeyupResidual();
+          onCerrar();
+        }
+        return;
+      }
+
+      // --- Fase procesando: ignorar teclas ---
+      if (fase === "procesando") return;
+
+      // --- Fase elegir impresión: ←/→ alternan, Enter confirma, Esc vuelve ---
+      if (fase === "elegirImpresion") {
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpcionImpresion((v) => (v === 0 ? 1 : 0));
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          confirmarCobro(opcionImpresion === 0);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          setFase("confirmarPago");
+          return;
+        }
+        return;
+      }
+
+      // --- Fase confirmar pago ---
+      if (fase === "confirmarPago") {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          volverACobro();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          irAElegirImpresion();
+          return;
+        }
+        return;
+      }
+
+      // --- Fase cobro ---
+      if (fase !== "cobro") return;
+
+      // 1. Atajos de métodos (F5-F8). Va PRIMERO para que funcionen
+      // incluso si ya hay un método activo (ej. cambias de Efectivo a Débito).
+      if (METODO_POR_TECLA[e.key]) {
+        e.preventDefault();
+        e.stopPropagation();
+        seleccionarMetodo(METODO_POR_TECLA[e.key]);
+        return;
+      }
+
+      // 2. Si hay un método activo (estamos tipeando el monto)
+      if (metodoActivo) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setMetodoActivo(null);
+          setMontoTipeado("");
+          setError(null);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          confirmarMonto();
+          return;
+        }
+        // Si el foco se perdió (ej. se clickeó un botón), redirigirlo
+        // al input de monto en vez de que la tecla caiga en el POS de atrás.
+        const enInput = document.activeElement === inputMontoRef.current;
+        if (!enInput && /^[0-9]$/.test(e.key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          inputMontoRef.current?.focus();
+          setMontoTipeado((prev) => prev + e.key);
+          return;
+        }
+        return;
+      }
+
+      // 3. Si NO hay método activo (navegando por los botones)
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (pagos.length === 0) {
+          seleccionarMetodo(METODO_DEFAULT);
+          return;
+        }
+        if (estaCubierto) {
+          irAConfirmarPago();
+        } else {
+          setError(`Falta cubrir ${formatearPrecio(restante)}`);
+        }
+        return;
+      }
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (pagos.length > 0) {
+          setPagos([]);
+          setError(null);
+        } else {
+          bloquearKeyupResidual();
+          onCerrar();
+        }
+        return;
+      }
+
+      if (e.key === "Backspace" || e.key === "Delete") {
+        if (pagos.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          quitarPago(pagos.length - 1);
+        }
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    fase,
+    metodoActivo,
+    pagos,
+    estaCubierto,
+    restante,
+    opcionImpresion,
+    seleccionarMetodo,
+    irAConfirmarPago,
+    irAElegirImpresion,
+    confirmarCobro,
+    quitarPago,
+    volverACobro,
+    onCerrar,
+  ]);
+
+  // -------------------- Render --------------------
+
+  // PASO ÉXITO
+  if (fase === "exito") {
+    return (
+      <Overlay>
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-emerald-600 p-6 text-center">
+            <p className="text-6xl mb-2">✅</p>
+            <h3 className="text-2xl font-black text-white">Venta registrada</h3>
+          </div>
+          <div className="p-6 text-center">
+            <p className="text-4xl font-black text-slate-800 mb-4">
+              {formatearPrecio(resultadoExito?.total ?? total)}
+            </p>
+            <p className="text-sm text-slate-600 mb-4">
+              {resultadoExito?.debeImprimir
+                ? resultadoExito?.impresion?.success
+                  ? "🖨️ Ticket enviado a impresora"
+                  : `⚠️ Impresora: ${resultadoExito?.impresion?.error || "error desconocido"}`
+                : "🚫 Ticket no impreso"}
+            </p>
+            <p className="text-[11px] text-slate-400 font-mono">
+              Volviendo al POS… (Enter para cerrar ya)
+            </p>
+          </div>
+        </div>
+      </Overlay>
+    );
+  }
+
+  // PASO 2: confirmar pago
+  if (fase === "confirmarPago") {
+    return (
+      <Overlay>
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-emerald-600 p-4 text-center">
+            <h3 className="text-2xl font-black text-white">Confirmar Pago</h3>
+          </div>
+          <div className="p-6">
+            <div className="text-center mb-6">
+              <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest mb-1">
+                Total a Cobrar
+              </p>
+              <p className="text-5xl font-black text-slate-800">
+                {formatearPrecio(total)}
+              </p>
+            </div>
+
+            <ResumenPagos pagos={pagos} total={total} />
+
+            {(() => {
+              const vuelto = redondear2(Math.max(0, totalPagado - total));
+              if (vuelto <= 0.001) return null;
+              return (
+                <div className="mt-4 p-3 rounded-xl text-center border-2 bg-sky-50 border-sky-200">
+                  <p className="text-xs font-bold uppercase text-sky-600">
+                    Vuelto
+                  </p>
+                  <p className="text-3xl font-black text-sky-700">
+                    {formatearPrecio(vuelto)}
+                  </p>
+                </div>
+              );
+            })()}
+
+            {error && (
+              <div className="mt-3 text-xs text-red-600 bg-red-50 p-2 rounded">
+                {error}
+              </div>
+            )}
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={volverACobro}
+                className="flex-1 px-4 py-3 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-xl transition"
+              >
+                ← Volver
+                <span className="block text-[10px] font-mono opacity-70 mt-0.5">
+                  (Esc)
+                </span>
+              </button>
+              <button
+                onClick={irAElegirImpresion}
+                className="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white font-black text-lg py-3 rounded-xl transition shadow-lg"
+              >
+                ✅ CONFIRMAR PAGO
+                <span className="block text-[10px] font-mono opacity-80 mt-0.5">
+                  (Enter)
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Overlay>
+    );
+  }
+
+  // PASO 3: elegir imprimir con ←/→ + Enter
+  if (fase === "elegirImpresion" || fase === "procesando") {
+    const cargando = fase === "procesando";
+    return (
+      <Overlay>
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-slate-700 p-4 text-center">
+            <h3 className="text-2xl font-black text-white">
+              ¿Imprimir Ticket?
+            </h3>
+          </div>
+          <div className="p-6">
+            <div className="text-center mb-6">
+              <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest mb-1">
+                Pago confirmado
+              </p>
+              <p className="text-4xl font-black text-emerald-600">
+                {formatearPrecio(total)}
+              </p>
+            </div>
+
+            <ResumenPagos pagos={pagos} total={total} />
+
+            <div className="mt-6">
+              <div className="flex gap-3">
+                <button
+                  onClick={() => !cargando && confirmarCobro(true)}
+                  disabled={cargando}
+                  className={`flex-1 py-5 rounded-xl font-black text-lg transition border-2 flex items-center justify-center gap-1 disabled:opacity-60 ${
+                    opcionImpresion === 0
+                      ? "bg-emerald-600 text-white border-emerald-600 shadow-lg ring-2 ring-offset-2 ring-emerald-400"
+                      : "bg-white text-slate-500 border-slate-300 hover:border-emerald-400"
+                  }`}
+                >
+                  <span className="text-xl">◀</span>
+                  🖨️ IMPRIMIR
+                </button>
+                <button
+                  onClick={() => !cargando && confirmarCobro(false)}
+                  disabled={cargando}
+                  className={`flex-1 py-5 rounded-xl font-black text-lg transition border-2 flex items-center justify-center gap-1 disabled:opacity-60 ${
+                    opcionImpresion === 1
+                      ? "bg-slate-700 text-white border-slate-700 shadow-lg ring-2 ring-offset-2 ring-slate-400"
+                      : "bg-white text-slate-500 border-slate-300 hover:border-slate-500"
+                  }`}
+                >
+                  🚫 NO IMPRIMIR
+                  <span className="text-xl">▶</span>
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500 text-center mt-3 font-mono">
+                {cargando
+                  ? "⏳ Procesando…"
+                  : "← → para elegir · Enter para confirmar · Esc para volver"}
+              </p>
+            </div>
+
+            {error && (
+              <div className="mt-3 text-xs text-red-600 bg-red-50 p-2 rounded">
+                {error}
+              </div>
+            )}
+          </div>
+        </div>
+      </Overlay>
+    );
+  }
+
+  // PASO 1: cobro
+  return (
+    <Overlay>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+        <div className="bg-emerald-600 p-4 text-center">
+          <h3 className="text-2xl font-black text-white">Cobrar Venta</h3>
+        </div>
+
+        <div className="p-6">
+          <div className="text-center mb-4">
+            <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest mb-1">
+              Total a Pagar
+            </p>
+            <p className="text-5xl font-black text-slate-800">
+              {formatearPrecio(total)}
+            </p>
+          </div>
+
+          {pagos.length > 0 && (
+            <div className="mb-4">
+              <ResumenPagos pagos={pagos} total={total} onQuitar={quitarPago} />
+            </div>
+          )}
+
+          <p className="text-xs font-bold text-slate-500 uppercase mb-2 text-center">
+            Elegí medio de pago
+          </p>
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            {METODOS.map((m) => {
+              const activo = metodoActivo?.key === m.key;
+              const deshabilitado = restante <= 0;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => seleccionarMetodo(m)}
+                  disabled={deshabilitado}
+                  className={`px-3 py-4 rounded-xl font-bold text-base border-2 transition flex items-center justify-between gap-2 disabled:opacity-40 disabled:cursor-not-allowed ${
+                    m.color === "emerald"
+                      ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                      : m.color === "indigo"
+                        ? "bg-indigo-50 text-indigo-800 border-indigo-300 hover:bg-indigo-100"
+                        : m.color === "sky"
+                          ? "bg-sky-50 text-sky-800 border-sky-300 hover:bg-sky-100"
+                          : "bg-violet-50 text-violet-800 border-violet-300 hover:bg-violet-100"
+                  } ${activo ? "ring-2 ring-offset-1 ring-emerald-500" : ""}`}
+                >
+                  <span>{m.nombre}</span>
+                  <span className="text-[10px] font-mono bg-white/70 px-1.5 py-0.5 rounded">
+                    {m.key}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {metodoActivo && (
+            <div className="mb-3">
+              <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                {metodoActivo.nombre} — Monto
+              </label>
+              <div className="relative">
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-2xl font-bold">
+                  $
+                </span>
+                <input
+                  ref={inputMontoRef}
+                  type="number"
+                  value={montoTipeado}
+                  onChange={(e) => setMontoTipeado(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      confirmarMonto();
+                    }
+                  }}
+                  placeholder={restante.toFixed(2)}
+                  className="w-full border-2 border-emerald-400 rounded-xl pl-10 pr-4 py-3 text-2xl font-bold text-right bg-emerald-50 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500 mt-1 text-right">
+                Restante a cubrir: <b>{formatearPrecio(restante)}</b> · Enter
+                confirma · Esc cancela
+              </p>
+              {metodoActivo?.nombre === "Efectivo" &&
+                Number(montoTipeado) > restante + 0.001 && (
+                  <p className="text-[10px] text-sky-700 mt-1 text-right font-semibold">
+                    Vuelto estimado:{" "}
+                    <b>
+                      {formatearPrecio(
+                        redondear2(Number(montoTipeado) - restante),
+                      )}
+                    </b>
+                  </p>
+                )}
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-3 text-xs text-red-600 bg-red-50 border border-red-200 p-2 rounded">
+              ⚠️ {error}
+            </div>
+          )}
+
+          <div className="flex gap-3 mt-6">
+            <button
+              onClick={onCerrar}
+              className="flex-1 px-4 py-3 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-xl transition"
+            >
+              Cancelar
+              <span className="block text-[10px] font-mono opacity-70 mt-0.5">
+                (Esc)
+              </span>
+            </button>
+            <button
+              onClick={irAConfirmarPago}
+              disabled={!estaCubierto}
+              className="flex-[2] bg-emerald-600 hover:bg-emerald-700 text-white font-black text-lg py-3 rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+            >
+              ✅ CONFIRMAR COBRO
+              <span className="block text-[10px] font-mono opacity-80 mt-0.5">
+                (Enter)
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+function Overlay({ children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      {children}
+    </div>
+  );
+}
+
+function ResumenPagos({ pagos, total, onQuitar }) {
+  if (pagos.length === 0) return null;
+  const totalPagado = pagos.reduce((s, p) => s + p.monto, 0);
+  const restante = Math.round((total - totalPagado) * 100) / 100;
+  return (
+    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+      <p className="text-[10px] font-bold text-slate-500 uppercase mb-2">
+        Pagos cargados
+      </p>
+      <ul className="space-y-1">
+        {pagos.map((p, i) => (
+          <li
+            key={i}
+            className="flex items-center justify-between text-sm bg-white rounded-lg px-3 py-1.5 border border-slate-200"
+          >
+            <span className="font-semibold text-slate-700">{p.metodo}</span>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-slate-800">
+                {formatearPrecio(p.monto)}
+              </span>
+              {onQuitar && (
+                <button
+                  onClick={() => onQuitar(i)}
+                  className="text-slate-300 hover:text-red-500 font-bold text-lg leading-none px-1"
+                  title="Quitar pago (Backspace)"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-2 pt-2 border-t border-slate-200 flex justify-between text-sm">
+        <span className="text-slate-500">Restante:</span>
+        <span
+          className={`font-black ${restante <= 0.001 ? "text-emerald-600" : "text-red-600"}`}
+        >
+          {restante <= 0.001 ? "Cubierto ✓" : formatearPrecio(restante)}
+        </span>
+      </div>
+    </div>
+  );
+}```
+
+### `frontend/src/components/HistorialModal.jsx`
+```jsx
+// src/components/HistorialModal.jsx
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import {
+  getVentasPorFecha,
+  getResumenDia,
+  reimprimirTicket,
+} from "../services/posApi";
+import { formatearPrecio } from "../utils/formateo";
+
+const FECHA_HOY = () => new Date().toISOString().slice(0, 10);
+
+// Métodos de pago que ofrece el filtro. "Mixto" se resuelve en el
+// cliente mirando v.metodoPago === "Mixto".
+const FILTROS = [
+  { key: "todos", label: "Todos" },
+  { key: "Efectivo", label: "Efectivo" },
+  { key: "Débito", label: "Débito" },
+  { key: "Cta. DNI", label: "Cta. DNI" },
+  { key: "Transferencia", label: "Transferencia" },
+  { key: "Mixto", label: "Mixto" },
+];
+
+// Normaliza los pagos de una venta (contrato nuevo o viejo).
+function normalizarPagos(v) {
+  if (Array.isArray(v.pagos) && v.pagos.length > 0) {
+    return v.pagos.map((p) => ({
+      metodo: String(p.metodo || "Efectivo"),
+      monto: Number(p.monto) || 0,
+    }));
+  }
+  return [
+    { metodo: v.metodoPago || "Efectivo", monto: Number(v.total) || 0 },
+  ];
+}
+
+// Matchea una venta contra el filtro de método seleccionado.
+function matcheaFiltro(venta, filtro) {
+  if (filtro === "todos") return true;
+  if (filtro === "Mixto") {
+    // "Mixto" = tiene más de un pago distinto, o metodoPago === "Mixto".
+    const pagos = normalizarPagos(venta);
+    const metodos = new Set(pagos.map((p) => p.metodo));
+    return metodos.size > 1 || venta.metodoPago === "Mixto";
+  }
+  return normalizarPagos(venta).some((p) => p.metodo === filtro);
+}
+
+export default function HistorialModal({ onCerrar }) {
+  // -------------------- Estado de datos --------------------
+  const [ventas, setVentas] = useState([]);
+  const [resumen, setResumen] = useState(null);
+  const [cargando, setCargando] = useState(true);
+  const [error, setError] = useState(null);
+
+  // -------------------- Estado de UI --------------------
+  const [fecha, setFecha] = useState(FECHA_HOY);
+  const [busqueda, setBusqueda] = useState("");
+  const [filtroMetodo, setFiltroMetodo] = useState("todos");
+  const [indiceSel, setIndiceSel] = useState(0);
+
+  // Fase: "lista" | "preview"
+  const [fase, setFase] = useState("lista");
+  const [ventaPreview, setVentaPreview] = useState(null);
+
+  const [imprimiendo, setImprimiendo] = useState(false);
+  const [msjExito, setMsjExito] = useState(null);
+
+  const inputBusquedaRef = useRef(null);
+  const inputFechaRef = useRef(null);
+
+  // -------------------- Fetch --------------------
+
+  const cargar = useCallback(async (fechaConsulta) => {
+    setCargando(true);
+    setError(null);
+    try {
+      const [ventasData, resumenData] = await Promise.all([
+        getVentasPorFecha(fechaConsulta),
+        getResumenDia(fechaConsulta).catch(() => null), // resumen es best-effort
+      ]);
+      setVentas(ventasData);
+      setResumen(resumenData);
+      setIndiceSel(0);
+    } catch (err) {
+      // Distinguimos "sin datos" de error real. Si el backend devuelve
+      // [], getVentasPorFecha no tira; un throw acá es error de red/servidor.
+      setVentas([]);
+      setResumen(null);
+      setError(err.message || "No se pudieron cargar las ventas");
+    } finally {
+      setCargando(false);
+    }
+  }, []);
+
+  // Carga inicial + cada vez que cambia la fecha
+  useEffect(() => {
+    cargar(fecha);
+  }, [fecha, cargar]);
+
+  // Foco inicial en el buscador (solo en fase lista)
+  useEffect(() => {
+    if (!cargando && fase === "lista") inputBusquedaRef.current?.focus();
+  }, [cargando, fase]);
+
+  // -------------------- Filtrado --------------------
+
+  const ventasFiltradas = useMemo(() => {
+    const t = busqueda.trim().toLowerCase();
+    return ventas.filter((v) => {
+      if (!matcheaFiltro(v, filtroMetodo)) return false;
+      if (!t) return true;
+      const matchId = String(v.id).toLowerCase().includes(t);
+      const matchProd = v.items?.some((it) =>
+        it.nombre?.toLowerCase().includes(t),
+      );
+      return matchId || matchProd;
+    });
+  }, [ventas, busqueda, filtroMetodo]);
+
+  // Resetear índice si cambia el filtro o la búsqueda
+  useEffect(() => {
+    setIndiceSel(0);
+  }, [busqueda, filtroMetodo, fecha]);
+
+  // -------------------- Acciones --------------------
+
+  const abrirPreview = useCallback((venta) => {
+    if (!venta) return;
+    setVentaPreview(venta);
+    setFase("preview");
+    setError(null);
+    setMsjExito(null);
+  }, []);
+
+  const volverALista = useCallback(() => {
+    setFase("lista");
+    setVentaPreview(null);
+    setMsjExito(null);
+    setError(null);
+  }, []);
+
+  const imprimirPreview = useCallback(async () => {
+    if (!ventaPreview || imprimiendo) return;
+    setImprimiendo(true);
+    setError(null);
+    setMsjExito(null);
+    try {
+      await reimprimirTicket(ventaPreview);
+      setMsjExito("✅ Ticket enviado a la impresora");
+      setTimeout(() => setMsjExito(null), 2000);
+    } catch (err) {
+      setError("Error al imprimir: " + err.message);
+    } finally {
+      setImprimiendo(false);
+    }
+  }, [ventaPreview, imprimiendo]);
+
+  // -------------------- Teclado (UN SOLO listener) --------------------
+  // Fase capture + stopPropagation, igual que antes, pero ahora ramifica
+  // según `fase`. No creamos listeners paralelos.
+
+  useEffect(() => {
+    const handler = (e) => {
+      // ===== FASE PREVIEW =====
+      if (fase === "preview") {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          volverALista();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          imprimirPreview();
+          return;
+        }
+        return;
+      }
+
+      // ===== FASE LISTA =====
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onCerrar();
+        return;
+      }
+
+      // Si el foco está en el input de fecha, dejamos que el navegador
+      // maneje flechas/Enter/espacio nativos (date picker). Solo Esc
+      // cierra el modal (ya manejado arriba).
+      if (document.activeElement === inputFechaRef.current) return;
+
+      if (ventasFiltradas.length === 0) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        setIndiceSel((prev) => (prev + 1) % ventasFiltradas.length);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        setIndiceSel(
+          (prev) =>
+            (prev - 1 + ventasFiltradas.length) % ventasFiltradas.length,
+        );
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        abrirPreview(ventasFiltradas[indiceSel]);
+      }
+    };
+
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [fase, ventasFiltradas, indiceSel, onCerrar, abrirPreview, volverALista, imprimirPreview]);
+
+  // -------------------- Helpers de render --------------------
+
+  const horaDe = (v) =>
+    new Date(v.fecha).toLocaleTimeString("es-AR", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+  // -------------------- RENDER: PREVIEW --------------------
+
+  if (fase === "preview" && ventaPreview) {
+    const pagos = normalizarPagos(ventaPreview);
+    const totalPagado = pagos.reduce((s, p) => s + p.monto, 0);
+    const vuelto = Math.max(
+      0,
+      Math.round((totalPagado - Number(ventaPreview.total || 0)) * 100) / 100,
+    );
+
+    return (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+          {/* HEADER */}
+          <div className="bg-indigo-600 p-4 flex items-center justify-between flex-shrink-0">
+            <div>
+              <h3 className="text-xl font-black text-white">Vista previa</h3>
+              <p className="text-indigo-100 text-xs font-mono">
+                Ticket #{ventaPreview.id}
+              </p>
+            </div>
+            <button
+              onClick={volverALista}
+              className="text-white hover:text-red-200 font-bold text-xl px-2"
+              title="Volver (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* CUERPO tipo ticket */}
+          <div className="flex-1 overflow-y-auto p-5 font-mono text-sm bg-slate-50">
+            <div className="text-center mb-2">
+              <p className="font-black text-base tracking-wide">DULCE REINO</p>
+              <p className="text-xs text-slate-500">Ticket de Venta</p>
+            </div>
+            <div className="border-t border-dashed border-slate-300 my-2" />
+            <div className="flex justify-between text-xs text-slate-600">
+              <span>Fecha:</span>
+              <span>
+                {new Date(ventaPreview.fecha).toLocaleString("es-AR")}
+              </span>
+            </div>
+            <div className="flex justify-between text-xs text-slate-600">
+              <span>Ticket #:</span>
+              <span>{ventaPreview.id}</span>
+            </div>
+            <div className="border-t border-dashed border-slate-300 my-2" />
+
+            {/* Items */}
+            <ul className="space-y-1">
+              {(ventaPreview.items || []).map((it, i) => (
+                <li key={i}>
+                  <p className="text-slate-800">{it.nombre}</p>
+                  <div className="flex justify-between text-xs text-slate-600">
+                    <span>
+                      {it.cantidad} x {formatearPrecio(it.precioUnitario)}
+                    </span>
+                    <span>{formatearPrecio(it.subtotal)}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            <div className="border-t border-dashed border-slate-300 my-2" />
+            <div className="flex justify-between font-black text-base text-slate-800">
+              <span>TOTAL</span>
+              <span>{formatearPrecio(ventaPreview.total)}</span>
+            </div>
+
+            <div className="border-t border-dashed border-slate-300 my-2" />
+            <p className="text-xs text-slate-500 mb-1">PAGOS:</p>
+            <ul className="space-y-0.5">
+              {pagos.map((p, i) => (
+                <li key={i} className="flex justify-between text-xs">
+                  <span>{p.metodo}</span>
+                  <span>{formatearPrecio(p.monto)}</span>
+                </li>
+              ))}
+            </ul>
+            {vuelto > 0.001 && (
+              <div className="flex justify-between text-xs mt-1 font-semibold text-sky-700">
+                <span>Vuelto:</span>
+                <span>{formatearPrecio(vuelto)}</span>
+              </div>
+            )}
+
+            <div className="border-t border-dashed border-slate-300 my-3" />
+            <p className="text-center text-xs text-slate-500">
+              ¡Gracias por su compra!
+            </p>
+          </div>
+
+          {/* MENSAJES */}
+          {msjExito && (
+            <div className="px-4 py-2 bg-emerald-50 border-t border-emerald-200 text-emerald-700 text-sm font-bold text-center">
+              {msjExito}
+            </div>
+          )}
+          {error && (
+            <div className="px-4 py-2 bg-red-50 border-t border-red-200 text-red-700 text-sm text-center">
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* FOOTER */}
+          <div className="p-4 bg-white border-t border-slate-200 flex gap-2 flex-shrink-0">
+            <button
+              onClick={volverALista}
+              className="flex-1 px-4 py-3 text-slate-600 font-bold bg-slate-100 hover:bg-slate-200 rounded-xl transition"
+            >
+              ← Volver
+              <span className="block text-[10px] font-mono opacity-70 mt-0.5">
+                (Esc)
+              </span>
+            </button>
+            <button
+              onClick={imprimirPreview}
+              disabled={imprimiendo}
+              className="flex-[2] bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-black text-base py-3 rounded-xl transition shadow-lg flex items-center justify-center gap-2"
+            >
+              🖨️ {imprimiendo ? "Imprimiendo..." : "Imprimir"}
+              <span className="text-[10px] font-mono opacity-80">(Enter)</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------- RENDER: LISTA --------------------
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
+        {/* HEADER */}
+        <div className="bg-indigo-600 p-4 flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-black text-white">Historial</h3>
+            <p className="text-indigo-100 text-xs">
+              Fecha: {fecha} · Enter abre vista previa
+            </p>
+          </div>
+          <button
+            onClick={onCerrar}
+            className="text-white hover:text-red-200 font-bold text-xl px-2"
+            title="Cerrar (Esc)"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* CONTROLES: fecha + búsqueda + filtro */}
+        <div className="p-4 border-b border-slate-200 bg-slate-50 space-y-2">
+          <div className="flex gap-2 items-center">
+            <label className="text-xs font-bold text-slate-600 uppercase whitespace-nowrap">
+              Fecha
+            </label>
+            <input
+              ref={inputFechaRef}
+              type="date"
+              value={fecha}
+              max={FECHA_HOY()}
+              onChange={(e) => setFecha(e.target.value || FECHA_HOY())}
+              className="border-2 border-indigo-300 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm"
+            />
+            <button
+              onClick={() => setFecha(FECHA_HOY())}
+              className="text-xs font-bold text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded hover:bg-indigo-50 transition"
+            >
+              Hoy
+            </button>
+          </div>
+
+          <input
+            ref={inputBusquedaRef}
+            type="text"
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar por Ticket # o producto... (↑↓ navegar · Enter ver detalle)"
+            className="w-full text-base border-2 border-indigo-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          />
+
+          <div className="flex flex-wrap gap-1.5">
+            {FILTROS.map((f) => {
+              const activo = filtroMetodo === f.key;
+              return (
+                <button
+                  key={f.key}
+                  onClick={() => setFiltroMetodo(f.key)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg border-2 transition ${
+                    activo
+                      ? "bg-indigo-600 text-white border-indigo-600"
+                      : "bg-white text-slate-600 border-slate-200 hover:border-indigo-300"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* LISTADO */}
+        <div className="flex-1 overflow-y-auto p-2">
+          {cargando ? (
+            <p className="text-center text-slate-500 py-10">Cargando ventas...</p>
+          ) : error ? (
+            <p className="text-center text-red-500 py-10">⚠️ {error}</p>
+          ) : ventasFiltradas.length === 0 ? (
+            <div className="text-center py-10">
+              <p className="text-slate-500">
+                {ventas.length === 0
+                  ? `No hay ventas registradas para ${fecha}.`
+                  : "No se encontraron ventas con ese filtro/búsqueda."}
+              </p>
+              {ventas.length === 0 && (
+                <button
+                  onClick={() => setFecha(FECHA_HOY())}
+                  className="mt-3 text-sm font-bold text-indigo-600 hover:text-indigo-800"
+                >
+                  ← Volver a hoy
+                </button>
+              )}
+            </div>
+          ) : (
+            <table className="w-full text-sm text-left">
+              <thead className="text-xs text-slate-500 uppercase bg-slate-100 sticky top-0 z-10">
+                <tr>
+                  <th className="px-3 py-2">Hora</th>
+                  <th className="px-3 py-2">Ticket #</th>
+                  <th className="px-3 py-2">Pago</th>
+                  <th className="px-3 py-2 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ventasFiltradas.map((v, i) => {
+                  const activo = i === indiceSel;
+                  return (
+                    <tr
+                      key={v.id}
+                      onClick={() => setIndiceSel(i)}
+                      onDoubleClick={() => abrirPreview(v)}
+                      className={`cursor-pointer transition-colors border-b border-slate-100 ${
+                        activo ? "bg-indigo-50" : "hover:bg-slate-50"
+                      }`}
+                    >
+                      <td className="px-3 py-2 text-slate-600">{horaDe(v)}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{v.id}</td>
+                      <td className="px-3 py-2 text-slate-600">
+                        {v.metodoPago || "Efectivo"}
+                      </td>
+                      <td className="px-3 py-2 text-right font-bold text-slate-800">
+                        {formatearPrecio(v.total)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* RESUMEN DEL DÍA (fijo en el footer) */}
+        {resumen && (
+          <div className="px-4 py-3 bg-indigo-50 border-t border-indigo-200">
+            <div className="flex justify-between items-start gap-4 text-sm">
+              <div className="flex-shrink-0">
+                <p className="text-[10px] font-bold uppercase text-indigo-500">
+                  Total facturado
+                </p>
+                <p className="text-xl font-black text-indigo-800">
+                  {formatearPrecio(resumen.totalFacturado)}
+                </p>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  {resumen.cantidadVentas} venta(s)
+                </p>
+              </div>
+              <div className="flex-1 text-right">
+                <p className="text-[10px] font-bold uppercase text-indigo-500 mb-0.5">
+                  Por método
+                </p>
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 justify-end text-xs">
+                  {Object.entries(resumen.porMetodo)
+                    .filter(([, monto]) => monto > 0)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([metodo, monto]) => (
+                      <span key={metodo} className="text-slate-700">
+                        <span className="font-semibold">{metodo}:</span>{" "}
+                        {formatearPrecio(monto)}
+                      </span>
+                    ))}
+                  {Object.keys(resumen.porMetodo).length === 0 && (
+                    <span className="text-slate-400">—</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MENSAJES */}
+        {msjExito && (
+          <div className="px-4 py-2 bg-emerald-50 border-t border-emerald-200 text-emerald-700 text-sm font-bold text-center">
+            {msjExito}
+          </div>
+        )}
+
+        {/* FOOTER */}
+        <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center">
+          <p className="text-xs text-slate-500">
+            {ventasFiltradas.length} de {ventas.length} venta(s)
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={onCerrar}
+              className="px-4 py-2 text-slate-600 font-bold bg-slate-200 hover:bg-slate-300 rounded-lg transition"
+            >
+              Cerrar (Esc)
+            </button>
+            <button
+              onClick={() => abrirPreview(ventasFiltradas[indiceSel])}
+              disabled={ventasFiltradas.length === 0}
+              className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold rounded-lg transition flex items-center gap-2"
+            >
+              👁️ Ver detalle (Enter)
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}```
+
+### `frontend/src/components/PanelPOS.jsx`
+```jsx
+// src/components/PanelPOS.jsx
+import { useState, useEffect, useRef } from "react";
+import { usePOS } from "../context/POSContext";
+import { formatearPrecio } from "../utils/formateo";
+import { CATALOGO_MOCK } from "../mocks/catalogoMock";
+import { usePOSAtajos } from "../hooks/usePOSAtajos";
+import { usePOSBusqueda } from "../hooks/usePOSBusqueda";
+import { usePOSCarga } from "../hooks/usePOSCarga";
+import CobroModal from "./CobroModal";
+import ArqueoCajaModal from "./ArqueoCajaModal";
+import HistorialModal from "./HistorialModal";
+
+// Orden de navegación con ← → en la barra superior
+const CAMPOS_ORDEN = ["producto", "cantidad", "precio"];
+
+export default function PanelPOS() {
+  const pos = usePOS();
+
+  // Modales
+  const [modalCobroAbierto, setModalCobroAbierto] = useState(false);
+  const [modalArqueoAbierto, setModalArqueoAbierto] = useState(false);
+  const [modalHistorialAbierto, setModalHistorialAbierto] = useState(false);
+
+  // Refs para foco
+  const inputProductoRef = useRef(null);
+  const inputCantidadRef = useRef(null);
+  const inputPrecioRef = useRef(null);
+  const grillaRef = useRef(null);
+
+  // Flag para ignorar el Enter residual que viene del modal de cobro/arqueo
+  const enterBloqueadoRef = useRef(false);
+
+  // Hooks de lógica
+  const busqueda = usePOSBusqueda(CATALOGO_MOCK);
+  const carga = usePOSCarga({
+    onProducto: (art, cantidad, precio) => {
+      const filaVacia = pos.items.find((it) => it.vacia);
+      if (filaVacia) {
+        pos.agregarProducto(filaVacia.id, art, cantidad, precio);
+      }
+    },
+    onManual: (precio, descripcion, cantidad) => {
+      pos.agregarManual(precio, descripcion, cantidad); // <-- Pasamos la cantidad
+    },
+  });
+  // Foco inicial en precio (carga rápida tipo teclado)
+  useEffect(() => {
+    const t = setTimeout(() => {
+      inputPrecioRef.current?.focus();
+      inputPrecioRef.current?.select();
+    }, 100);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Auto-scroll al fondo: la última fila siempre visible.
+  const ultimaFilaId = pos.items[pos.items.length - 1]?.id;
+  useEffect(() => {
+    const el = grillaRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [ultimaFilaId, pos.totales.cantidadItems]);
+
+  // -------------------- Navegación ← → entre campos --------------------
+
+  const navegarCampo = (origen, direccion) => {
+    const idx = CAMPOS_ORDEN.indexOf(origen);
+    if (idx === -1) return;
+    const destinoIdx = Math.min(
+      CAMPOS_ORDEN.length - 1,
+      Math.max(0, idx + direccion),
+    );
+    const destino = CAMPOS_ORDEN[destinoIdx];
+
+    if (destino === "producto") {
+      inputProductoRef.current?.focus();
+      inputProductoRef.current?.select();
+    } else if (destino === "cantidad") {
+      inputCantidadRef.current?.focus();
+      inputCantidadRef.current?.select();
+    } else if (destino === "precio") {
+      inputPrecioRef.current?.focus();
+      inputPrecioRef.current?.select();
+    }
+  };
+
+  // Devuelve true si consumió la tecla (para que el caller haga return)
+  const handleFlechasCampo = (origen, e) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      navegarCampo(origen, -1);
+      return true;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      e.stopPropagation();
+      navegarCampo(origen, +1);
+      return true;
+    }
+    return false;
+  };
+
+  // -------------------- Acciones reusables --------------------
+
+  const enfocarProducto = () => {
+    inputProductoRef.current?.focus();
+    inputProductoRef.current?.select();
+  };
+
+  const enfocarCantidad = () => {
+    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto)
+      return;
+    inputCantidadRef.current?.focus();
+    inputCantidadRef.current?.select();
+  };
+
+  const enfocarPrecio = () => {
+    if (modalCobroAbierto || modalArqueoAbierto || modalHistorialAbierto)
+      return;
+    inputPrecioRef.current?.focus();
+    inputPrecioRef.current?.select();
+  };
+
+  const abrirArqueo = () => setModalArqueoAbierto(true);
+  const abrirHistorial = () => setModalHistorialAbierto(true);
+
+  const borrarUltima = () => pos.quitarUltima();
+
+  const cobrar = () => {
+    if (pos.totales.cantidadItems > 0) setModalCobroAbierto(true);
+  };
+
+  // Callbacks para cerrar modales, blindados contra fugas de teclado
+  const cerrarModalCobro = () => {
+    setModalCobroAbierto(false);
+    enterBloqueadoRef.current = true;
+
+    // Desbloquea el Enter residual
+    setTimeout(() => {
+      enterBloqueadoRef.current = false;
+    }, 150);
+
+    // Devuelve el foco a Precio después de que el modal se desmonte
+    setTimeout(() => {
+      inputPrecioRef.current?.focus();
+      inputPrecioRef.current?.select();
+    }, 200); // 200ms da tiempo a React a limpiar el modal y a CobroModal a soltar el foco
+  };
+
+  const cerrarModalArqueo = () => {
+    setModalArqueoAbierto(false);
+    enterBloqueadoRef.current = true;
+    setTimeout(() => {
+      enterBloqueadoRef.current = false;
+    }, 150);
+  };
+
+  const cerrarModalHistorial = () => {
+    setModalHistorialAbierto(false);
+    enterBloqueadoRef.current = true;
+    setTimeout(() => {
+      enterBloqueadoRef.current = false;
+    }, 150);
+  };
+
+  // Atajos de teclado (F1/F2/F3/F4/F9/F10). Se desactivan si hay modal abierto.
+  usePOSAtajos({
+    onBuscar: enfocarProducto,
+    onPrecio: enfocarPrecio,
+    onHistorial: abrirHistorial,
+    onArqueo: abrirArqueo,
+    onBorrarUltima: borrarUltima,
+    onCobrar: cobrar,
+    activo: !modalCobroAbierto && !modalArqueoAbierto && !modalHistorialAbierto,
+  });
+
+  // -------------------- Handlers de la barra superior --------------------
+
+  const seleccionarProducto = (art) => {
+    busqueda.setBusqueda(art.nombre);
+    busqueda.cerrar();
+    carga.seleccionar(art);
+    setTimeout(enfocarPrecio, 50);
+  };
+
+  const handleProductoKeyDown = (e) => {
+    // ← / → navegan entre campos. ↑ / ↓ los maneja el dropdown.
+    if (handleFlechasCampo("producto", e)) return;
+    const res = busqueda.handleKeyDown(e);
+    if (!res) return;
+    if (res.tipo === "seleccionar") {
+      seleccionarProducto(res.art);
+    } else if (res.tipo === "pasar-a-precio") {
+      enfocarPrecio();
+    }
+  };
+
+  const handleCantidadKeyDown = (e) => {
+    if (handleFlechasCampo("cantidad", e)) return;
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      carga.incrementarCantidad(1);
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      carga.incrementarCantidad(-1);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      enfocarPrecio();
+    }
+  };
+
+  const confirmarCargaYLimpiar = () => {
+    console.log(
+      "[confirmarCargaYLimpiar] cantidad actual:",
+      JSON.stringify(carga.cantidad),
+      "precio:",
+      JSON.stringify(carga.precio),
+    );
+    const descripcionTipeada = busqueda.busqueda;
+    const r = carga.confirmarCarga(descripcionTipeada);
+    if (r.ok) {
+      busqueda.limpiar();
+    }
+    setTimeout(enfocarPrecio, 50);
+  };
+
+  const handlePrecioKeyDown = (e) => {
+    if (handleFlechasCampo("precio", e)) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (enterBloqueadoRef.current) return; // Frena el Enter residual
+      confirmarCargaYLimpiar();
+    }
+  };
+
+  // -------------------- Edición inline en la grilla --------------------
+
+  const handleEditarPrecio = (id, valor) => {
+    const n = Number(valor);
+    if (Number.isFinite(n) && n >= 0 && n <= 999000) {
+      pos.editarPrecio(id, n);
+    }
+  };
+
+  const handleEditarCantidad = (id, valor) => {
+    const n = parseInt(valor, 10);
+    if (Number.isFinite(n) && n >= 1) {
+      pos.editarCantidad(id, n);
+    }
+  };
+
+  // -------------------- Render --------------------
+
+  return (
+    <div className="h-screen w-screen flex flex-col bg-slate-50 text-slate-800 overflow-hidden">
+      {/* HEADER */}
+      <header className="bg-slate-100 border-b border-slate-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <span className="text-3xl">🧾</span>
+          <div>
+            <h1 className="font-bold text-slate-800 text-lg leading-tight">
+              POS Rápido
+            </h1>
+            <p className="text-xs text-slate-500 capitalize">
+              {new Date().toLocaleDateString("es-AR", {
+                weekday: "long",
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+              })}
+            </p>
+          </div>
+        </div>
+
+        {/* Botones F1-F10 azul #51A2FF */}
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          <AtajoBoton onClick={enfocarProducto} tecla="F1" label="Escanear" />
+          <AtajoBoton onClick={enfocarPrecio} tecla="F2" label="Precio" />
+          <AtajoBoton onClick={abrirHistorial} tecla="F3" label="Historial" />
+          <AtajoBoton onClick={abrirArqueo} tecla="F4" label="Caja" />
+          <AtajoBoton onClick={borrarUltima} tecla="F9" label="Borrar" />
+          <AtajoBoton onClick={cobrar} tecla="F10" label="Cobrar" />
+        </div>
+      </header>
+
+      {/* INPUT SUPERIOR */}
+      <div className="p-3 bg-white border-b border-slate-200 shadow-sm z-10 relative flex-shrink-0">
+        <div className="flex gap-2 items-start">
+          {/* Producto */}
+          <div className="relative flex-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+              Producto (F1)
+            </label>
+            <input
+              ref={inputProductoRef}
+              type="text"
+              value={busqueda.busqueda}
+              onChange={(e) => {
+                busqueda.handleChange(e.target.value);
+                carga.setError(null);
+                if (carga.artSeleccionado) carga.deseleccionar();
+              }}
+              onKeyDown={handleProductoKeyDown}
+              placeholder="Escanear o buscar..."
+              className="w-full text-base border-2 border-indigo-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 h-[50px]"
+            />
+            {busqueda.dropAbierto && busqueda.resultados.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 max-h-64 overflow-y-auto">
+                {busqueda.resultados.map((a, i) => (
+                  <div
+                    key={a.sku}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => seleccionarProducto(a)}
+                    className={`px-3 py-2 cursor-pointer flex justify-between items-center text-sm ${
+                      i === busqueda.indiceDrop
+                        ? "bg-indigo-50"
+                        : "hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="truncate flex-1">
+                      <span className="font-semibold text-slate-800">
+                        {a.nombre}
+                      </span>
+                      <span className="text-[10px] text-slate-500 ml-2">
+                        {a.sku}
+                      </span>
+                    </div>
+                    <span className="font-bold text-slate-700 ml-2">
+                      {formatearPrecio(a.costoUnitario)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Cantidad (sin botones − / +, con ↑ ↓ y ← →) */}
+          <div className="w-28 flex-shrink-0">
+            <label className="text-[10px] font-bold text-slate-500 uppercase block mb-1">
+              Cant.
+            </label>
+            <input
+              ref={inputCantidadRef}
+              type="number"
+              min={1}
+              value={carga.cantidad}
+              onChange={(e) => carga.cambiarCantidad(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onKeyDown={handleCantidadKeyDown}
+              className="w-full text-center text-lg font-bold border-2 border-slate-300 rounded-lg bg-white h-[50px] px-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+            />
+          </div>
+
+          {/* Precio */}
+          <div className="w-52 flex-shrink-0">
+            <label className="text-[10px] font-bold text-sky-600 uppercase block mb-1">
+              Precio (Enter)
+            </label>
+            <div className="flex items-center border-2 border-sky-400 rounded-lg overflow-hidden bg-sky-50 h-[50px] focus-within:ring-2 focus-within:ring-sky-500">
+              <span className="pl-3 text-sky-500 text-xl font-bold">$</span>
+              <input
+                ref={inputPrecioRef}
+                type="number"
+                value={carga.precio}
+                onChange={(e) => carga.cambiarPrecio(e.target.value)}
+                onKeyDown={handlePrecioKeyDown}
+                placeholder="0.00"
+                className="w-full px-2 py-2 text-right text-xl font-bold bg-transparent border-0 text-sky-900 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none placeholder-sky-300"
+              />
+            </div>
+          </div>
+        </div>
+
+        {carga.error && (
+          <div className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1">
+            ⚠️ {carga.error}
+          </div>
+        )}
+      </div>
+
+      {/* GRILLA */}
+      <div ref={grillaRef} className="flex-1 overflow-y-auto bg-slate-50 p-2">
+        <table className="w-full text-sm text-left">
+          <thead className="text-xs text-slate-500 uppercase bg-slate-100 sticky top-0 z-10">
+            <tr>
+              <th className="px-2 py-1 w-10">#</th>
+              <th className="px-2 py-1">Producto</th>
+              <th className="px-2 py-1 w-28 text-center">Cant.</th>
+              <th className="px-2 py-1 w-36 text-right">P. Unit.</th>
+              <th className="px-2 py-1 w-32 text-right">Subtotal</th>
+              <th className="px-2 py-1 w-12"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {pos.items.map((it, idx) => {
+              if (it.vacia) {
+                return (
+                  <tr key={it.id} className="bg-slate-50/50">
+                    <td className="px-2 py-2 text-slate-300 font-mono">
+                      {idx + 1}
+                    </td>
+                    <td className="px-2 py-2 text-slate-400 italic" colSpan={4}>
+                      Esperando próximo ítem…
+                    </td>
+                    <td></td>
+                  </tr>
+                );
+              }
+              return (
+                <tr
+                  key={it.id}
+                  className={`border-b border-slate-200 hover:bg-white transition-colors ${
+                    it.esNuevo ? "bg-emerald-50/60" : "bg-white"
+                  }`}
+                >
+                  <td className="px-2 py-1 text-slate-400 font-mono text-xs">
+                    {idx + 1}
+                  </td>
+                  <td className="px-2 py-1">
+                    <input
+                      type="text"
+                      value={it.nombre}
+                      onChange={(e) => pos.editarNombre(it.id, e.target.value)}
+                      onFocus={(e) => e.target.select()}
+                      className="w-full bg-transparent border-0 focus:outline-none focus:bg-indigo-50 rounded px-1 py-0.5 text-base text-slate-800 font-medium"
+                    />
+                    <div className="text-[10px] text-slate-400 font-mono px-1">
+                      {it.sku ? `SKU ${it.sku}` : "Manual"}
+                      {it.precioEditado && (
+                        <span className="ml-1 text-amber-600">· editado</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-2 py-1">
+                    <div className="flex items-center justify-center gap-1">
+                      <button
+                        onClick={() =>
+                          pos.editarCantidad(it.id, it.cantidad - 1)
+                        }
+                        disabled={it.cantidad <= 1}
+                        className="px-3 py-1 text-base font-bold text-slate-600 hover:bg-slate-100 rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="number"
+                        value={it.cantidad}
+                        min={1}
+                        onChange={(e) =>
+                          handleEditarCantidad(it.id, e.target.value)
+                        }
+                        onFocus={(e) => e.target.select()}
+                        className="w-14 text-center bg-transparent border border-transparent hover:border-slate-300 focus:border-indigo-400 focus:bg-white rounded px-1 py-0.5 font-bold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      />
+                      <button
+                        onClick={() =>
+                          pos.editarCantidad(it.id, it.cantidad + 1)
+                        }
+                        className="px-3 py-1 text-base font-bold text-slate-600 hover:bg-slate-100 rounded"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </td>
+                  <td className="px-2 py-1 text-right">
+                    <input
+                      type="number"
+                      value={it.precioUnitario}
+                      onChange={(e) =>
+                        handleEditarPrecio(it.id, e.target.value)
+                      }
+                      onFocus={(e) => e.target.select()}
+                      className="w-32 text-sm text-right bg-transparent border border-transparent hover:border-slate-300 focus:border-sky-400 focus:bg-sky-50 rounded px-1 py-0.5 font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                  </td>
+                  <td className="px-2 py-1 text-right font-bold text-base text-slate-800">
+                    {formatearPrecio(it.subtotal)}
+                  </td>
+                  <td className="px-2 py-1 text-center">
+                    <button
+                      onClick={() => pos.quitarItem(it.id)}
+                      className="text-slate-300 hover:text-red-500 font-bold text-lg leading-none px-1"
+                      title="Quitar ítem"
+                    >
+                      ×
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* FOOTER: totales a la izquierda, COBRAR a la derecha */}
+      <footer className="bg-white border-t-2 border-slate-300 px-4 py-3 flex items-center justify-between flex-shrink-0 shadow-[0_-4px_6px_-4px_rgba(0,0,0,0.1)]">
+        <div className="flex gap-6 text-slate-600">
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-400">
+              Ítems
+            </p>
+            <p className="text-2xl font-black text-slate-700">
+              {pos.totales.cantidadItems}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-400">
+              Unidades
+            </p>
+            <p className="text-2xl font-black text-slate-700">
+              {pos.totales.totalUnidades}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-6">
+          <button
+            onClick={cobrar}
+            disabled={pos.totales.cantidadItems === 0}
+            className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-black text-xl px-8 py-3 rounded-xl shadow-lg transition-colors flex items-center gap-3"
+          >
+            💵 COBRAR
+            <span className="text-xs font-mono opacity-80 border border-white/30 rounded px-1.5 py-0.5">
+              F10
+            </span>
+          </button>
+          <div className="text-right">
+            <p className="text-[10px] font-bold uppercase text-slate-400">
+              Total
+            </p>
+            <p className="text-5xl font-black text-slate-900 leading-none">
+              {formatearPrecio(pos.totales.total)}
+            </p>
+          </div>
+        </div>
+      </footer>
+
+      {/* MODALES */}
+      {modalCobroAbierto && <CobroModal onCerrar={cerrarModalCobro} />}
+
+      {modalArqueoAbierto && <ArqueoCajaModal onCerrar={cerrarModalArqueo} />}
+
+      {modalHistorialAbierto && (
+        <HistorialModal onCerrar={cerrarModalHistorial} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Botón pastel de atajo. Ahora azul #51A2FF sólido, texto blanco.
+ */
+function AtajoBoton({ onClick, tecla, label }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{ backgroundColor: "#51A2FF" }}
+      className="flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-semibold text-white border border-[#3a8be6] rounded-lg transition-colors hover:brightness-110 active:brightness-95 shadow-sm"
+    >
+      <kbd className="text-[10px] font-mono bg-white/25 border border-white/40 rounded px-1 py-0.5 text-white">
+        {tecla}
+      </kbd>
+      {label}
+    </button>
+  );
+}
+```
+
+### `frontend/src/context/POSContext.jsx`
+```jsx
+// src/context/POSContext.jsx
+// src/context/POSContext.jsx
+import {
+  createContext,
+  useContext,
+  useReducer,
+  useCallback,
+  useMemo,
+} from "react";
+
+function generarId() {
+  return `pos_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function redondear2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function crearFilaVacia() {
+  return {
+    id: generarId(),
+    tipo: "producto",
+    sku: null,
+    nombre: "",
+    cantidad: 1,
+    precioUnitario: 0,
+    subtotal: 0,
+    precioEditado: false,
+    stock: null,
+    imagen: null,
+    vacia: true,
+    esNuevo: false,
+  };
+}
+
+const estadoInicial = {
+  items: [crearFilaVacia()],
+};
+
+function reducer(state, action) {
+  switch (action.type) {
+    case "AGREGAR_PRODUCTO": {
+      const {
+        filaId,
+        art,
+        cantidad = 1,
+        precioForzado = null,
+      } = action.payload;
+      if (!art) return state;
+
+      const sku = String(art.sku || art.refId || art.id || "").trim();
+      if (!sku) return state;
+
+      const precioUnitario =
+        precioForzado !== null && precioForzado !== undefined
+          ? Number(precioForzado) || 0
+          : Number(
+              art.costoConDescuento ?? art.costoUnitario ?? art.precio ?? 0,
+            );
+
+      const existenteIdx = state.items.findIndex(
+        (it) => !it.vacia && it.sku === sku,
+      );
+
+      if (existenteIdx >= 0) {
+        const nuevosItems = state.items.map((it, i) => {
+          if (i === existenteIdx) {
+            const nuevaCantidad =
+              it.cantidad + Math.max(1, Number(cantidad) || 1);
+            return {
+              ...it,
+              cantidad: nuevaCantidad,
+              subtotal: redondear2(nuevaCantidad * it.precioUnitario),
+            };
+          }
+          if (it.id === filaId) return crearFilaVacia();
+          return it;
+        });
+        return { ...state, items: nuevosItems };
+      }
+
+      const cant = Math.max(1, Number(cantidad) || 1);
+      const nuevosItems = state.items.map((it) => {
+        if (it.id !== filaId) return it;
+        return {
+          id: it.id,
+          tipo: "producto",
+          sku,
+          nombre: String(art.nombre || "Sin nombre"),
+          cantidad: cant,
+          precioUnitario: redondear2(precioUnitario),
+          subtotal: redondear2(cant * precioUnitario),
+          precioEditado: false,
+          stock: art.stock ?? null,
+          imagen: art.imagen || null,
+          vacia: false,
+          esNuevo: true,
+        };
+      });
+
+      return { ...state, items: [...nuevosItems, crearFilaVacia()] };
+    }
+
+    case "AGREGAR_MANUAL": {
+      const { monto = 0, descripcion = "", cantidad = 1 } = action.payload; // <-- Agregamos cantidad
+      const precioUnitario = Number(monto) || 0;
+      const cant = Math.max(1, Math.floor(Number(cantidad) || 1));
+
+      const nuevoItem = {
+        id: generarId(),
+        tipo: "manual",
+        sku: null,
+        nombre:
+          descripcion?.trim() ||
+          (precioUnitario > 0 ? "Monto manual" : "Art. Kiosco"),
+        cantidad: cant, // <-- Ahora usa la cantidad real
+        precioUnitario,
+        subtotal: redondear2(cant * precioUnitario), // <-- Y calcula el subtotal
+        precioEditado: false,
+        stock: null,
+        imagen: null,
+        vacia: false,
+        esNuevo: true,
+      };
+
+      const filasReales = state.items.filter((it) => !it.vacia);
+      const filaVacia = state.items.find((it) => it.vacia) || crearFilaVacia();
+
+      return {
+        ...state,
+        items: [...filasReales, nuevoItem, filaVacia],
+      };
+    }
+
+    case "EDITAR_PRECIO": {
+      const { id, nuevoPrecio } = action.payload;
+      const precio = Number(nuevoPrecio);
+      if (!Number.isFinite(precio) || precio < 0) return state;
+
+      return {
+        ...state,
+        items: state.items.map((it) =>
+          it.id === id
+            ? {
+                ...it,
+                precioUnitario: redondear2(precio),
+                subtotal: redondear2(precio * it.cantidad),
+                precioEditado: true,
+                esNuevo: false,
+              }
+            : it,
+        ),
+      };
+    }
+
+    case "EDITAR_CANTIDAD": {
+      const { id, nuevaCantidad } = action.payload;
+      const cant = Math.max(1, Math.floor(Number(nuevaCantidad) || 1));
+
+      return {
+        ...state,
+        items: state.items.map((it) =>
+          it.id === id
+            ? {
+                ...it,
+                cantidad: cant,
+                subtotal: redondear2(cant * it.precioUnitario),
+              }
+            : it,
+        ),
+      };
+    }
+
+    case "EDITAR_NOMBRE": {
+      const { id, nuevoNombre } = action.payload;
+      return {
+        ...state,
+        items: state.items.map((it) =>
+          it.id === id
+            ? { ...it, nombre: String(nuevoNombre || "").trim() || it.nombre }
+            : it,
+        ),
+      };
+    }
+
+    case "QUITAR": {
+      const { id } = action.payload;
+      const sinFila = state.items.filter((it) => it.id !== id);
+      return {
+        ...state,
+        items: sinFila.length === 0 ? [crearFilaVacia()] : sinFila,
+      };
+    }
+
+    case "QUITAR_ULTIMA": {
+      const filasReales = state.items.filter((it) => !it.vacia);
+      if (filasReales.length === 0) return state;
+
+      const sinUltima = filasReales.slice(0, -1);
+      return {
+        ...state,
+        items: [...sinUltima, crearFilaVacia()],
+      };
+    }
+
+    case "VACIAR":
+      return { ...state, items: [crearFilaVacia()] };
+
+    case "LIMPIAR_NUEVO": {
+      const { id } = action.payload;
+      return {
+        ...state,
+        items: state.items.map((it) =>
+          it.id === id ? { ...it, esNuevo: false } : it,
+        ),
+      };
+    }
+
+    default:
+      return state;
+  }
+}
+
+const POSContext = createContext(null);
+
+export function POSProvider({ children }) {
+  const [state, dispatch] = useReducer(reducer, estadoInicial);
+
+  const agregarProducto = useCallback(
+    (filaId, art, cantidad = 1, precioForzado = null) => {
+      dispatch({
+        type: "AGREGAR_PRODUCTO",
+        payload: { filaId, art, cantidad, precioForzado },
+      });
+    },
+    [],
+  );
+
+  const agregarManual = useCallback(
+    (monto = 0, descripcion = "", cantidad = 1) => {
+      dispatch({
+        type: "AGREGAR_MANUAL",
+        payload: { monto, descripcion, cantidad },
+      });
+    },
+    [],
+  );
+
+  const editarPrecio = useCallback((id, nuevoPrecio) => {
+    dispatch({ type: "EDITAR_PRECIO", payload: { id, nuevoPrecio } });
+  }, []);
+
+  const editarCantidad = useCallback((id, nuevaCantidad) => {
+    dispatch({ type: "EDITAR_CANTIDAD", payload: { id, nuevaCantidad } });
+  }, []);
+
+  const editarNombre = useCallback((id, nuevoNombre) => {
+    dispatch({ type: "EDITAR_NOMBRE", payload: { id, nuevoNombre } });
+  }, []);
+
+  const quitarItem = useCallback((id) => {
+    dispatch({ type: "QUITAR", payload: { id } });
+  }, []);
+
+  const quitarUltima = useCallback(() => {
+    dispatch({ type: "QUITAR_ULTIMA" });
+  }, []);
+
+  const vaciar = useCallback(() => dispatch({ type: "VACIAR" }), []);
+
+  const limpiarNuevo = useCallback((id) => {
+    dispatch({ type: "LIMPIAR_NUEVO", payload: { id } });
+  }, []);
+
+  const totales = useMemo(() => {
+    const filas = state.items.filter((it) => !it.vacia);
+    const totalUnidades = filas.reduce((s, it) => s + it.cantidad, 0);
+    const total = redondear2(filas.reduce((s, it) => s + it.subtotal, 0));
+    return {
+      cantidadItems: filas.length,
+      totalUnidades,
+      total,
+    };
+  }, [state.items]);
+
+  /**
+   * Construye el ticket con el CONTRATO que espera el backend:
+   *
+   *   { id: null, fecha, pagos[], metodoPago, total, totalPagado, vuelto, items[] }
+   *
+   * IMPORTANTE:
+   *   - `id` se manda null. El backend lo asigna atómicamente al
+   *     guardar (T-00001, T-00002, ...). No confiamos en IDs del front.
+   *   - `fecha` es ISO local; el backend usa `fechaArchivo` (YYYY-MM-DD)
+   *     para decidir el archivo del día si viene, si no usa la fecha.
+   */
+  const construirTicket = useCallback(
+    (pagos = []) => {
+      const pagosNormalizados = (Array.isArray(pagos) ? pagos : []).map(
+        (p) => ({
+          metodo: String(p?.metodo || "Efectivo"),
+          monto: redondear2(p?.monto),
+        }),
+      );
+
+      const totalPagado = redondear2(
+        pagosNormalizados.reduce((s, p) => s + p.monto, 0),
+      );
+      const vuelto = redondear2(Math.max(0, totalPagado - totales.total));
+
+      const metodoPago =
+        pagosNormalizados.length === 0
+          ? "Efectivo"
+          : pagosNormalizados.length === 1
+            ? pagosNormalizados[0].metodo
+            : "Mixto";
+
+      const ahora = new Date();
+
+      return {
+        id: null, // ← el backend lo asigna (T-00001, T-00002, ...)
+        fecha: ahora.toISOString(),
+        // YYYY-MM-DD en hora local, para que el backend guarde en el
+        // archivo del día correcto (no se desfasa por timezone).
+        fechaArchivo: ahora.toISOString().slice(0, 10),
+        pagos: pagosNormalizados,
+        metodoPago,
+        total: totales.total,
+        totalPagado,
+        vuelto,
+        items: state.items
+          .filter((it) => !it.vacia)
+          .map((it) => ({
+            tipo: it.tipo,
+            sku: it.sku,
+            nombre: it.nombre,
+            cantidad: it.cantidad,
+            precioUnitario: it.precioUnitario,
+            subtotal: it.subtotal,
+            precioEditado: it.precioEditado,
+          })),
+      };
+    },
+    [state.items, totales.total],
+  );
+
+  const value = {
+    items: state.items,
+    itemsReales: state.items.filter((it) => !it.vacia),
+    totales,
+    agregarProducto,
+    agregarManual,
+    editarPrecio,
+    editarCantidad,
+    editarNombre,
+    quitarItem,
+    quitarUltima,
+    vaciar,
+    limpiarNuevo,
+    construirTicket,
+  };
+
+  return <POSContext.Provider value={value}>{children}</POSContext.Provider>;
+}
+
+export function usePOS() {
+  const ctx = useContext(POSContext);
+  if (!ctx) throw new Error("usePOS debe usarse dentro de <POSProvider>");
+  return ctx;
+}
+```
+
+### `frontend/src/hooks/usePOSAtajos.js`
+```js
+// frontend/src/hooks/usePOSAtajos.js
+import { useEffect } from "react";
+
+/**
+ * ATAJOS DE TECLADO DEL POS
+ * Registra los atajos globales en fase CAPTURE (para que el navegador
+ * no se robe F5/F10/etc).
+ *
+ * @param {object} opts
+ * @param {Function} opts.onBuscar       F1
+ * @param {Function} opts.onPrecio       F2
+ * @param {Function} opts.onHistorial    F3
+ * @param {Function} opts.onArqueo       F4
+ * @param {Function} opts.onBorrarUltima F9
+ * @param {Function} opts.onCobrar       F10
+ * @param {boolean}  opts.activo         false → no registra nada
+ */
+export function usePOSAtajos({
+  onBuscar,
+  onPrecio,
+  onHistorial,
+  onArqueo,
+  onBorrarUltima,
+  onCobrar,
+  activo = true,
+}) {
+  useEffect(() => {
+    if (!activo) return;
+
+    const handler = (e) => {
+      switch (e.key) {
+        case "F1":
+          e.preventDefault();
+          onBuscar?.();
+          break;
+        case "F2":
+          e.preventDefault();
+          onPrecio?.();
+          break;
+        case "F3":
+          e.preventDefault();
+          onHistorial?.();
+          break;
+        case "F4":
+          e.preventDefault();
+          onArqueo?.();
+          break;
+        case "F9":
+          e.preventDefault();
+          onBorrarUltima?.();
+          break;
+        case "F10":
+          e.preventDefault();
+          onCobrar?.();
+          break;
+        default:
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [
+    onBuscar,
+    onPrecio,
+    onHistorial,
+    onArqueo,
+    onBorrarUltima,
+    onCobrar,
+    activo,
+  ]);
+
+  return {
+    buscar: () => onBuscar?.(),
+    precio: () => onPrecio?.(),
+    historial: () => onHistorial?.(),
+    arqueo: () => onArqueo?.(),
+    borrarUltima: () => onBorrarUltima?.(),
+    cobrar: () => onCobrar?.(),
+  };
+}```
+
+### `frontend/src/hooks/usePOSBusqueda.js`
+```js
+// frontend/src/hooks/usePOSBusqueda.js
+import { useState, useMemo, useCallback } from "react";
+
+/**
+ * ============================================================
+ * BÚSQUEDA / DROPDOWN DE PRODUCTOS DEL POS
+ * ============================================================
+ *
+ * Maneja:
+ *   - texto del input
+ *   - apertura/cierre del dropdown
+ *   - índice seleccionado (flechas ↑↓)
+ *   - filtrado en memoria (nombre / marca / sku)
+ *   - selección con Enter
+ *
+ * @param {Array} catalogo  Productos cargados del proveedor actual
+ * @param {number} maxResultados
+ */
+export function usePOSBusqueda(catalogo, maxResultados = 8) {
+  const [busqueda, setBusqueda] = useState("");
+  const [dropAbierto, setDropAbierto] = useState(false);
+  const [indiceDrop, setIndiceDrop] = useState(0);
+
+  const resultados = useMemo(() => {
+    const t = busqueda.trim().toLowerCase();
+    if (!t) return [];
+    return (catalogo || [])
+      .filter((a) => {
+        const blob =
+          `${a.nombre || ""} ${a.marca || ""} ${a.sku || ""}`.toLowerCase();
+        return blob.includes(t);
+      })
+      .slice(0, maxResultados);
+  }, [busqueda, catalogo, maxResultados]);
+
+  /**
+   * Busca por coincidencia EXACTA de sku/refId (para escaneo).
+   * Devuelve el producto o null.
+   */
+  const buscarPorCodigo = useCallback(
+    (codigo) => {
+      const t = String(codigo || "")
+        .trim()
+        .toLowerCase();
+      if (!t) return null;
+      return (
+        (catalogo || []).find(
+          (a) =>
+            String(a.sku || "").toLowerCase() === t ||
+            String(a.refId || "").toLowerCase() === t,
+        ) || null
+      );
+    },
+    [catalogo],
+  );
+
+  const handleChange = useCallback((valor) => {
+    setBusqueda(valor);
+    setDropAbierto(valor.length > 0);
+    setIndiceDrop(0);
+  }, []);
+
+  const cerrar = useCallback(() => {
+    setDropAbierto(false);
+  }, []);
+
+  const limpiar = useCallback(() => {
+    setBusqueda("");
+    setDropAbierto(false);
+    setIndiceDrop(0);
+  }, []);
+
+  /**
+   * Maneja teclas del input del dropdown.
+   * Devuelve la acción a ejecutar (o null si no aplica).
+   *
+   * - ArrowDown / ArrowUp → mueve índice
+   * - Enter con dropdown abierto → selecciona el del índice
+   * - Escape → cierra
+   * - Enter con dropdown cerrado → intenta buscar por código exacto
+   *
+   * El caller decide qué hacer con el producto devuelto.
+   */
+  const handleKeyDown = useCallback(
+    (e) => {
+      if (dropAbierto && resultados.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setIndiceDrop((prev) => (prev + 1) % resultados.length);
+          return { tipo: "navegar" };
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setIndiceDrop(
+            (prev) => (prev - 1 + resultados.length) % resultados.length,
+          );
+          return { tipo: "navegar" };
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const art = resultados[indiceDrop] || resultados[0]; // <-- Fallback al primero
+          return art ? { tipo: "seleccionar", art } : { tipo: "vacio" };
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setDropAbierto(false);
+          return { tipo: "cerrar" };
+        }
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const art = buscarPorCodigo(busqueda);
+        return art ? { tipo: "seleccionar", art } : { tipo: "pasar-a-precio" };
+      }
+      return null;
+    },
+    [dropAbierto, resultados, indiceDrop, buscarPorCodigo, busqueda],
+  );
+
+  return {
+    // estado
+    busqueda,
+    dropAbierto,
+    indiceDrop,
+    resultados,
+    // acciones
+    setBusqueda,
+    setIndiceDrop,
+    handleChange,
+    handleKeyDown,
+    cerrar,
+    limpiar,
+    buscarPorCodigo,
+  };
+}
+```
+
+### `frontend/src/hooks/usePOSCarga.js`
+```js
+// frontend/src/hooks/usePOSCarga.js
+import { useState, useCallback } from "react";
+
+/**
+ * Tope de precio. Si un EAN escaneado por error cae acá, se rechaza
+ * (es el bug clásico de "pistola de códigos en el input de precio").
+ */
+export const TOPE_PRECIO = 999000;
+
+/**
+ * Tope de cantidad. Evita que un "9999999" tipeado por error rompa
+ * los totales del ticket.
+ */
+export const TOPE_CANTIDAD = 9999;
+
+/**
+ * ============================================================
+ * CARGA DE PRODUCTO EN LA BARRA SUPERIOR
+ * ============================================================
+ *
+ * Maneja el estado de la barra superior:
+ *   - artSeleccionado (producto del catálogo, o null → manual)
+ *   - cantidad (STRING, para permitir borrar y tipear libre)
+ *   - precio   (STRING, idem)
+ *
+ * `cantidad` es string a propósito: si fuera número, borrar el input
+ * lo forzaría a 1 y no se podría tipear "2" (el clásico bug del
+ * input numérico controlado). Se parsea recién en `confirmarCarga`.
+ *
+ * @param {object} opts
+ * @param {Function} opts.onProducto  (art, cantidad, precio) → void
+ * @param {Function} opts.onManual    (precio, descripcion) → void
+ */
+export function usePOSCarga({ onProducto, onManual }) {
+  const [artSeleccionado, setArtSeleccionado] = useState(null);
+  const [cantidad, setCantidad] = useState("1"); // string
+  const [precio, setPrecio] = useState("");
+  const [error, setError] = useState(null);
+
+  /**
+   * Selecciona un producto del catálogo.
+   * Precarga su costo como precio por defecto y resetea cantidad a 1.
+   */
+  const seleccionar = useCallback((art) => {
+    if (!art) return;
+    setArtSeleccionado(art);
+
+    const costo = Number(
+      art.costoConDescuento ?? art.costoUnitario ?? art.precio ?? 0,
+    );
+    setPrecio(costo > 0 ? costo.toFixed(2) : "");
+    setCantidad("1");
+    setError(null);
+  }, []);
+
+  /**
+   * Deselecciona el producto del catálogo SIN tocar cantidad ni precio.
+   * A diferencia de `seleccionar(null)` (que es no-op por el `if (!art) return`),
+   * esto sí limpia `artSeleccionado` para que el próximo Enter en precio
+   * agregue un ítem manual en vez del producto viejo.
+   */
+  const deseleccionar = useCallback(() => setArtSeleccionado(null), []);
+
+  /**
+   * Acepta el string tal cual, permitiendo "" (input vacío mientras
+   * el usuario tipea) y dígitos. Ignora cualquier otra cosa.
+   * NO clampa acá: el clamp a 1 se hace en `confirmarCarga`, para no
+   * romper el tipeo intermedio.
+   */
+  const cambiarCantidad = useCallback((nueva) => {
+    console.log("[cambiarCantidad] recibe:", JSON.stringify(nueva));
+    const s = String(nueva);
+    if (s === "" || /^\d+$/.test(s)) {
+      setCantidad(s);
+      console.log("[cambiarCantidad] setea a:", JSON.stringify(s));
+    }
+  }, []);
+
+  /**
+   * Suma/resta al valor actual. Si el string está vacío, parte de 1.
+   * Se usa desde ↑ / ↓ en el input de cantidad.
+   */
+  const incrementarCantidad = useCallback((delta) => {
+    setCantidad((prev) => {
+      const base = prev === "" ? 1 : Number(prev) || 1;
+      const n = Math.max(1, base + delta);
+      return String(n);
+    });
+  }, []);
+
+  const cambiarPrecio = useCallback((nuevo) => {
+    setPrecio(nuevo);
+    setError(null);
+  }, []);
+
+  const limpiar = useCallback(() => {
+    console.log('[limpiar] llamado, resetea cantidad a "1"');
+    setArtSeleccionado(null);
+    setCantidad("1");
+    setPrecio("");
+    setError(null);
+  }, []);
+
+  /**
+   * Confirma la carga en la grilla.
+   *
+   * Reglas:
+   *  - precio > 0
+   *  - precio <= TOPE_PRECIO
+   *  - cantidad entre 1 y TOPE_CANTIDAD (clampea a 1 si vacío/0)
+   *  - si hay art seleccionado → onProducto(art, cantidad, precio)
+   *  - si no → onManual(precio, descripcionTipeada || "Art. Kiosco")
+   *
+   * Devuelve { ok: boolean, error?: string }.
+   */
+  const confirmarCarga = useCallback(
+    (descripcionTipeada = "") => {
+      const precioNum = Number(precio) || 0;
+      const cantNum = Math.max(1, Math.floor(Number(cantidad) || 0));
+
+      if (precioNum <= 0) {
+        setError("El precio debe ser mayor a 0");
+        return { ok: false, error: "precio<=0" };
+      }
+
+      if (precioNum > TOPE_PRECIO) {
+        setError(
+          `El precio no puede superar los $${TOPE_PRECIO.toLocaleString(
+            "es-AR",
+          )} (¿Escaneaste un código por error?)`,
+        );
+        return { ok: false, error: "precio>tope" };
+      }
+
+      if (cantNum > TOPE_CANTIDAD) {
+        setError(`La cantidad no puede superar ${TOPE_CANTIDAD}`);
+        return { ok: false, error: "cantidad>tope" };
+      }
+
+      if (artSeleccionado) {
+        onProducto?.(artSeleccionado, cantNum, precioNum);
+      } else {
+        const desc = String(descripcionTipeada || "").trim() || "Art. Kiosco";
+        onManual?.(precioNum, desc, cantNum); // <-- Agregamos cantNum como 3er parámetro
+      }
+
+      limpiar();
+      return { ok: true };
+    },
+    [precio, cantidad, artSeleccionado, onProducto, onManual, limpiar],
+  );
+
+  return {
+    // estado
+    artSeleccionado,
+    cantidad,
+    precio,
+    error,
+    // acciones
+    seleccionar,
+    deseleccionar,
+    cambiarCantidad,
+    incrementarCantidad,
+    cambiarPrecio,
+    limpiar,
+    confirmarCarga,
+    setError,
+  };
+}
+```
+
+### `frontend/src/index.css`
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;```
+
+### `frontend/src/main.jsx`
+```jsx
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css'
+import App from './App.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+)
+```
+
+### `frontend/src/mocks/catalogoMock.js`
+```js
+// frontend/src/mocks/catalogoMock.js
+// Mock del catálogo. Cuando conectes el backend real, reemplazá este
+// array por un fetch (o un hook useCatalogo) y borrá este archivo.
+export const CATALOGO_MOCK = [
+  {
+    sku: "7790040133578",
+    nombre: "ALF. AGUILA MINI TORTA CLASICA x71,5g",
+    marca: "Aguila",
+    costoUnitario: 980.5,
+  },
+  {
+    sku: "7790040137578",
+    nombre: "ALF. AGUILA MINI TORTA DARK x71,5g",
+    marca: "Aguila",
+    costoUnitario: 980.5,
+  },
+  {
+    sku: "7790580103743",
+    nombre: "CHOC.COPLER BLOCKx300g.",
+    marca: "Cofler",
+    costoUnitario: 7716,
+  },
+  {
+    sku: "7790580105013",
+    nombre: "CHOC.COPLER BLOCKx170g.",
+    marca: "Cofler",
+    costoUnitario: 4747,
+  },
+];```
+
+### `frontend/src/services/posApi.js`
+```js
+// frontend/src/services/posApi.js
+import { api } from "../api/client.js";
+
+/**
+ * Wrappers sobre `api.*` con manejo de error uniforme y normalización.
+ * No tiene estado. No toca React.
+ */
+
+// ==================== ARQUEO ====================
+
+export async function cerrarCaja({ montoInicial, efectivoDeclarado }) {
+  const inicial = Number(montoInicial);
+  const declarado = Number(efectivoDeclarado);
+
+  if (!Number.isFinite(inicial) || inicial < 0) {
+    throw new Error("Monto inicial inválido");
+  }
+  if (!Number.isFinite(declarado) || declarado < 0) {
+    throw new Error("Efectivo declarado inválido");
+  }
+
+  const data = await api.posCerrarCaja(inicial, declarado);
+
+  if (!data?.success || !data.resumen) {
+    throw new Error(data?.error || "El backend no devolvió un resumen válido");
+  }
+
+  return data.resumen;
+}
+
+// ==================== REIMPRESIÓN ====================
+
+export async function reimprimirTicket(ticket) {
+  const data = await api.posImprimir(ticket);
+  if (!data?.success) {
+    throw new Error(data?.error || "No se pudo reimprimir");
+  }
+  return data;
+}
+
+// ==================== VENTAS POR FECHA ====================
+
+/**
+ * Trae las ventas de una fecha (YYYY-MM-DD). Si `fecha` es falsy, hoy.
+ * Devuelve un array de ventas ordenado de más nueva a más vieja.
+ * Si el archivo no existe, el backend devuelve [] (no error).
+ */
+export async function getVentasPorFecha(fecha) {
+  const data = await api.posVentasHoy(fecha);
+  if (!data?.success || !Array.isArray(data.ventas)) {
+    throw new Error(data?.error || "Respuesta inválida del backend");
+  }
+  return [...data.ventas].reverse();
+}
+
+// ==================== RESUMEN DEL DÍA ====================
+
+/**
+ * Resumen agregado del día (server-side). Devuelve:
+ * { fecha, cantidadVentas, totalFacturado, porMetodo: { Efectivo: N, ... } }
+ */
+export async function getResumenDia(fecha) {
+  const data = await api.posResumenDia(fecha);
+  if (!data?.success) {
+    throw new Error(data?.error || "No se pudo obtener el resumen del día");
+  }
+  return {
+    fecha: data.fecha,
+    cantidadVentas: data.cantidadVentas ?? 0,
+    totalFacturado: data.totalFacturado ?? 0,
+    porMetodo: data.porMetodo ?? {},
+  };
+}
+
+// ==================== SIGUIENTE TICKET ====================
+
+/**
+ * Devuelve el próximo ID de ticket (formateado, p.ej. "T-00042") SIN
+ * reservarlo. Es informativo para la UI: la reserva real ocurre al
+ * guardar la venta en POST /api/pos/venta.
+ */
+export async function getSiguienteTicket() {
+  const data = await api.posSiguienteTicket();
+  if (!data?.success || !data.id) {
+    throw new Error(data?.error || "No se pudo obtener el próximo ticket");
+  }
+  return data.id;
+}```
+
+### `frontend/src/utils/formateo.js`
+```js
+// src/utils/formateo.js
+export function formatearPrecio(n) {
+  const num = Number(n) || 0;
+  return num.toLocaleString('es-AR', {
+    style: 'currency',
+    currency: 'ARS',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}```
+
+### `frontend/tailwind.config.js`
+```js
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,jsx}",
+  ],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}```
+
+### `frontend/vite.config.js`
+```js
+// frontend/vite.config.js
+import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
+    },
+  },
+})```
+
+### `start.sh`
+```sh
+#!/usr/bin/env bash
+# start.sh — Levanta backend y frontend del POS Dulce Reino en WSL.
+# Uso: ./start.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$SCRIPT_DIR/backend"
+FRONT_DIR="$SCRIPT_DIR/frontend"
+
+echo "🚀 Levantando POS Dulce Reino..."
+echo "   Backend:  $BACKEND_DIR  →  http://localhost:4000"
+echo "   Frontend: $FRONT_DIR    →  http://localhost:5173"
+echo ""
+
+# Cargar pnpm si no está en el PATH (pasa cuando se ejecuta desde
+# el acceso directo de Windows, que no carga .bashrc).
+if ! command -v pnpm >/dev/null 2>&1; then
+  [ -d "$HOME/.local/share/pnpm" ] && export PATH="$HOME/.local/share/pnpm:$PATH"
+  [ -s "$HOME/.nvm/nvm.sh" ] && source "$HOME/.nvm/nvm.sh" >/dev/null 2>&1
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "❌ ERROR: pnpm no está en el PATH."
+  echo "   Instalalo con: npm install -g pnpm"
+  exit 1
+fi
+
+# Verificar que existan las dependencias instaladas en cada subproyecto.
+# Si no, avisamos en vez de fallar con un error críptico de Vite/nodemon.
+if [ ! -d "$BACKEND_DIR/node_modules" ]; then
+  echo "⚠️  Falta backend/node_modules. Corré: (cd backend && pnpm install)"
+  exit 1
+fi
+if [ ! -d "$FRONT_DIR/node_modules" ]; then
+  echo "⚠️  Falta frontend/node_modules. Corré: (cd frontend && pnpm install)"
+  exit 1
+fi
+
+echo "✅ pnpm $(pnpm --version)"
+echo ""
+
+# Trap para matar los procesos al salir (Ctrl+C, cierre de terminal, etc.)
+cleanup() {
+  echo ""
+  echo "🛑 Deteniendo..."
+  kill $(jobs -p) 2>/dev/null
+  wait 2>/dev/null
+  exit 0
+}
+trap cleanup EXIT INT TERM
+
+# Backend
+( cd "$BACKEND_DIR" && pnpm dev ) &
+BACKEND_PID=$!
+echo "✅ Backend lanzado (PID: $BACKEND_PID)"
+
+# Frontend
+( cd "$FRONT_DIR" && pnpm dev ) &
+FRONT_PID=$!
+echo "✅ Frontend lanzado (PID: $FRONT_PID)"
+
+echo ""
+echo "⏳ Esperando... (Ctrl+C para detener todo)"
+echo ""
+
+# Si cualquiera de los dos muere, matamos el otro y salimos.
+# Esto evita el caso feo de "el backend crasheó pero el front sigue vivo".
+wait -n
+echo "⚠️  Uno de los procesos terminó. Cerrando el otro..."
+cleanup```
+

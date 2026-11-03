@@ -1,18 +1,6 @@
-// frontend/src/components/panel/POSHeader.jsx
+// src/components/panel/POSHeader.jsx
 import AtajoBoton from "./AtajoBoton";
 
-/**
- * Header del POS: logo, fecha y botones de atajo (F1-F10).
- * Componente puramente visual.
- *
- * Props:
- *   - onEscanear        {Function}  F1
- *   - onPrecio          {Function}  F2
- *   - onHistorial       {Function}  F3
- *   - onArqueo          {Function}  F4
- *   - onBorrarUltima    {Function}  F9
- *   - onCobrar          {Function}  F10
- */
 export default function POSHeader({
   onEscanear,
   onPrecio,
@@ -20,6 +8,7 @@ export default function POSHeader({
   onArqueo,
   onBorrarUltima,
   onCobrar,
+  onAbrirAdmin, // <-- 1. Agregamos esta prop
 }) {
   return (
     <header className="bg-slate-100 border-b border-slate-300 px-4 py-2 flex items-center justify-between flex-shrink-0">
@@ -47,6 +36,15 @@ export default function POSHeader({
         <AtajoBoton onClick={onArqueo} tecla="F4" label="Caja" />
         <AtajoBoton onClick={onBorrarUltima} tecla="F9" label="Borrar" />
         <AtajoBoton onClick={onCobrar} tecla="F10" label="Cobrar" />
+        
+        {/* 2. Agregamos el botón para ir a Admin */}
+        <button
+          onClick={onAbrirAdmin}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-semibold text-slate-600 bg-slate-200 border border-slate-300 rounded-lg transition-colors hover:bg-slate-300 ml-2"
+          title="Configuración y Catálogo"
+        >
+          ⚙️ Admin
+        </button>
       </div>
     </header>
   );

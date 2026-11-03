@@ -1,21 +1,6 @@
-// frontend/src/hooks/useCatalogoMaestro.js
-//
-// Hook que trae el catálogo maestro del backend y lo cachea en memoria.
-//
-// Contrato:
-//   const { productos, cargando, error, recargar } = useCatalogoMaestro();
-//
-// - `productos`: array de productos ya normalizados al shape que espera
-//   el POS (con costoUnitario, nombre, sku, etc.). [] mientras carga.
-// - `cargando`: true en el primer fetch o cuando se llama a recargar().
-// - `error`: string | null.
-// - `recargar()`: fuerza un re-fetch (útil después de importar o editar).
-//
-// Se monta UNA sola vez (en PanelPOS) y comparte el cache vía módulo.
-// Si el backend devuelve 0 productos, `productos` es [] pero NO es error.
-
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api/client.js";
+
 
 // Cache a nivel módulo. Si dos componentes usan el hook, no duplican fetch.
 let _cache = null; // { productos, ts }

@@ -31,8 +31,6 @@ async function post(path, body, opts = {}) {
     headers["X-Skip-Print"] = "1";
   }
 
-  // Si body es FormData, dejamos que el browser ponga el Content-Type
-  // (con boundary) y NO mandamos el header manual.
   const esFormData =
     typeof FormData !== "undefined" && body instanceof FormData;
   const headersFinal = esFormData ? undefined : headers;
@@ -97,6 +95,10 @@ export const api = {
     put(`/catalogo-maestro/${encodeURIComponent(sku)}`, cambios),
   catalogoMaestroEliminar: (sku) =>
     del(`/catalogo-maestro/${encodeURIComponent(sku)}`),
+  
+  // Historial de importaciones del catálogo maestro
+  catalogoMaestroImportacionesLista: () =>
+    get("/catalogo-maestro/importaciones/lista"),
 
   // ==================== IMPORTAR EXCEL ====================
   importarPreview: (file, headerRow = null) => {

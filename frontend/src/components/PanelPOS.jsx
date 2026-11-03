@@ -16,7 +16,7 @@ import POSFooter from "./panel/POSFooter";
 import GrillaItems from "./panel/GrillaItems";
 import BarraCarga from "./panel/BarraCarga";
 
-export default function PanelPOS() {
+export default function PanelPOS({ onAbrirAdmin }) {
   const pos = usePOS();
 
   const modales = usePOSModales();
@@ -75,6 +75,7 @@ export default function PanelPOS() {
         onArqueo={modales.abrirArqueo}
         onBorrarUltima={borrarUltima}
         onCobrar={cobrar}
+        onAbrirAdmin={onAbrirAdmin}
       />
 
       <BarraCarga
@@ -119,9 +120,12 @@ export default function PanelPOS() {
         catalogo.productos.length === 0 && (
           <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex-shrink-0">
             📦 El catálogo está vacío. Importá un Excel desde{" "}
-            <a href="/admin" className="underline font-semibold">
+            <button
+              onClick={onAbrirAdmin}
+              className="underline font-semibold hover:text-amber-900"
+            >
               el panel de administración
-            </a>{" "}
+            </button>{" "}
             para empezar a vender.
           </div>
         )}
