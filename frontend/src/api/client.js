@@ -95,8 +95,6 @@ export const api = {
     put(`/catalogo-maestro/${encodeURIComponent(sku)}`, cambios),
   catalogoMaestroEliminar: (sku) =>
     del(`/catalogo-maestro/${encodeURIComponent(sku)}`),
-  
-  // Historial de importaciones del catálogo maestro
   catalogoMaestroImportacionesLista: () =>
     get("/catalogo-maestro/importaciones/lista"),
 
