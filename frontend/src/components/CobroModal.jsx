@@ -6,9 +6,9 @@ import { formatearPrecio } from "../utils/formateo";
 
 const METODOS = [
   { key: "F5", nombre: "Efectivo", pideMonto: true, color: "emerald" },
-  { key: "F6", nombre: "Cta. DNI", pideMonto: false, color: "indigo" },
-  { key: "F7", nombre: "Débito", pideMonto: false, color: "sky" },
-  { key: "F8", nombre: "Transferencia", pideMonto: false, color: "violet" },
+  { key: "F6", nombre: "Cta. DNI", pideMonto: true, color: "indigo" },
+  { key: "F7", nombre: "Débito", pideMonto: true, color: "sky" },
+  { key: "F8", nombre: "Transferencia", pideMonto: true, color: "violet" },
 ];
 
 const METODO_POR_TECLA = Object.fromEntries(METODOS.map((m) => [m.key, m]));
@@ -18,9 +18,6 @@ function redondear2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
 
-// Bloquea el keyup residual de una tecla que ya se manejó en keydown.
-// Se usa al cerrar el modal para que el Enter de "confirmar cobro"
-// no se filtre al POS de atrás.
 function bloquearKeyupResidual() {
   const stop = (e) => {
     e.preventDefault();
@@ -40,10 +37,8 @@ export default function CobroModal({ onCerrar }) {
   const [pagos, setPagos] = useState([]);
   const [metodoActivo, setMetodoActivo] = useState(null);
   const [montoTipeado, setMontoTipeado] = useState("");
-  // Fases: 'cobro' | 'confirmarPago' | 'elegirImpresion' | 'procesando' | 'exito'
   const [fase, setFase] = useState("cobro");
   const [error, setError] = useState(null);
-  // Selección del cartel de impresión: 0 = Imprimir (default), 1 = No imprimir
   const [opcionImpresion, setOpcionImpresion] = useState(0);
   const [resultadoExito, setResultadoExito] = useState(null);
 
@@ -60,10 +55,6 @@ export default function CobroModal({ onCerrar }) {
   );
   const estaCubierto = restante <= 0.001;
 
-  // Foco en el input de monto. Se dispara al elegir método (el input
-  // recién ahí se monta). Usamos requestAnimationFrame para garantizar
-  // que el DOM ya esté pintado, y un segundo intento por si otro
-  // setTimeout (ej. el `enfocarPrecio` de PanelPOS) nos pisa el foco.
   useEffect(() => {
     if (!metodoActivo) return;
     const enfocar = () => {
@@ -71,66 +62,40 @@ export default function CobroModal({ onCerrar }) {
       inputMontoRef.current?.select();
     };
     const raf = requestAnimationFrame(enfocar);
-    const t = setTimeout(enfocar, 80); // reintento tras el setTimeout(50) de PanelPOS
+    const t = setTimeout(enfocar, 80);
     return () => {
       cancelAnimationFrame(raf);
       clearTimeout(t);
     };
   }, [metodoActivo]);
 
-  // Auto-cierre del paso 'exito'
   useEffect(() => {
     if (fase !== "exito") return;
     const t = setTimeout(() => onCerrar(), 1800);
     return () => clearTimeout(t);
   }, [fase, onCerrar]);
 
-  // -------------------- Acciones --------------------
-
   const seleccionarMetodo = useCallback(
     (metodo) => {
       if (fase !== "cobro") return;
       setError(null);
-
-      if (!metodo.pideMonto) {
-        if (restante <= 0) return;
-        const nuevosPagos = [
-          ...pagos,
-          { metodo: metodo.nombre, monto: restante },
-        ];
-        setPagos(nuevosPagos);
-        setMetodoActivo(null);
-        setMontoTipeado("");
-        const totalPagadoNuevo = redondear2(
-          nuevosPagos.reduce((s, p) => s + p.monto, 0),
-        );
-        if (totalPagadoNuevo >= total - 0.001) {
-          setFase("confirmarPago");
-        }
-        return;
-      }
+      if (restante <= 0) return;
 
       setMetodoActivo(metodo);
-      setMontoTipeado("");
+      setMontoTipeado(restante.toFixed(2));
     },
-    [fase, restante, pagos, total],
+    [fase, restante],
   );
 
   const confirmarMonto = useCallback(() => {
     if (!metodoActivo) return;
 
-    // Si el campo está vacío, asumimos el restante (que es lo que muestra el placeholder).
-    // Esto permite cobrar el total con un solo Enter tras elegir Efectivo.
-    const montoTipeadoReal =
-      montoTipeado === "" ? restante : Number(montoTipeado);
-    const n = Number(montoTipeadoReal);
+    const n = Number(montoTipeado);
 
     if (!Number.isFinite(n) || n <= 0) {
       setError("Ingresá un monto válido");
       return;
     }
-    // Efectivo: se permite sobrepago (el vuelto se muestra en confirmarPago).
-    // Otros métodos: no pueden superar el restante.
     if (metodoActivo.nombre !== "Efectivo" && n > restante + 0.001) {
       setError(`El monto supera el restante (${formatearPrecio(restante)})`);
       return;
@@ -176,12 +141,10 @@ export default function CobroModal({ onCerrar }) {
   }, [estaCubierto, restante]);
 
   const irAElegirImpresion = useCallback(() => {
-    setOpcionImpresion(0); // default: imprimir
+    setOpcionImpresion(0);
     setFase("elegirImpresion");
     setError(null);
   }, []);
-
-  // -------------------- Confirmación final --------------------
 
   const confirmarCobro = useCallback(
     async (debeImprimir) => {
@@ -190,18 +153,13 @@ export default function CobroModal({ onCerrar }) {
       try {
         const ticket = pos.construirTicket(pagos);
         const data = await api.posVenta(ticket, { imprimir: debeImprimir });
-
-        // Guardamos el resultado para mostrarlo en la pantalla de éxito
         setResultadoExito({
           debeImprimir,
           impresion: data.impresion || null,
           total: ticket.total,
         });
         setFase("exito");
-        // El vaciado del carrito se hace recién al cerrar (o podés hacerlo acá)
         pos.vaciar();
-        // Evitamos que el keyup/keypress de la tecla que disparó esto
-        // se escape al POS de atrás.
         bloquearKeyupResidual();
       } catch (err) {
         setError(err.message);
@@ -211,17 +169,13 @@ export default function CobroModal({ onCerrar }) {
     [pagos, pos],
   );
 
-  // -------------------- Teclado --------------------
-
   useEffect(() => {
     const handler = (e) => {
-      // Bloquear teclas del navegador
       if (["F5", "F6", "F7", "F8"].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
       }
 
-      // --- Fase éxito: Enter/click cierra; auto-cierre por timeout ---
       if (fase === "exito") {
         if (e.key === "Enter" || e.key === "Escape") {
           e.preventDefault();
@@ -232,10 +186,8 @@ export default function CobroModal({ onCerrar }) {
         return;
       }
 
-      // --- Fase procesando: ignorar teclas ---
       if (fase === "procesando") return;
 
-      // --- Fase elegir impresión: ←/→ alternan, Enter confirma, Esc vuelve ---
       if (fase === "elegirImpresion") {
         if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
           e.preventDefault();
@@ -258,7 +210,6 @@ export default function CobroModal({ onCerrar }) {
         return;
       }
 
-      // --- Fase confirmar pago ---
       if (fase === "confirmarPago") {
         if (e.key === "Escape") {
           e.preventDefault();
@@ -275,11 +226,8 @@ export default function CobroModal({ onCerrar }) {
         return;
       }
 
-      // --- Fase cobro ---
       if (fase !== "cobro") return;
 
-      // 1. Atajos de métodos (F5-F8). Va PRIMERO para que funcionen
-      // incluso si ya hay un método activo (ej. cambias de Efectivo a Débito).
       if (METODO_POR_TECLA[e.key]) {
         e.preventDefault();
         e.stopPropagation();
@@ -287,7 +235,6 @@ export default function CobroModal({ onCerrar }) {
         return;
       }
 
-      // 2. Si hay un método activo (estamos tipeando el monto)
       if (metodoActivo) {
         if (e.key === "Escape") {
           e.preventDefault();
@@ -296,14 +243,17 @@ export default function CobroModal({ onCerrar }) {
           setError(null);
           return;
         }
+        // FIX: Si el foco está en el input de monto, dejamos que el Enter
+        // lo maneje el propio input (onKeyDown) para que lea el estado actualizado.
         if (e.key === "Enter") {
+          if (document.activeElement === inputMontoRef.current) {
+            return;
+          }
           e.preventDefault();
           e.stopPropagation();
           confirmarMonto();
           return;
         }
-        // Si el foco se perdió (ej. se clickeó un botón), redirigirlo
-        // al input de monto en vez de que la tecla caiga en el POS de atrás.
         const enInput = document.activeElement === inputMontoRef.current;
         if (!enInput && /^[0-9]$/.test(e.key)) {
           e.preventDefault();
@@ -315,7 +265,6 @@ export default function CobroModal({ onCerrar }) {
         return;
       }
 
-      // 3. Si NO hay método activo (navegando por los botones)
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
@@ -372,9 +321,6 @@ export default function CobroModal({ onCerrar }) {
     onCerrar,
   ]);
 
-  // -------------------- Render --------------------
-
-  // PASO ÉXITO
   if (fase === "exito") {
     return (
       <Overlay>
@@ -403,7 +349,6 @@ export default function CobroModal({ onCerrar }) {
     );
   }
 
-  // PASO 2: confirmar pago
   if (fase === "confirmarPago") {
     return (
       <Overlay>
@@ -470,7 +415,6 @@ export default function CobroModal({ onCerrar }) {
     );
   }
 
-  // PASO 3: elegir imprimir con ←/→ + Enter
   if (fase === "elegirImpresion" || fase === "procesando") {
     const cargando = fase === "procesando";
     return (
@@ -538,7 +482,6 @@ export default function CobroModal({ onCerrar }) {
     );
   }
 
-  // PASO 1: cobro
   return (
     <Overlay>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
@@ -622,17 +565,6 @@ export default function CobroModal({ onCerrar }) {
                 Restante a cubrir: <b>{formatearPrecio(restante)}</b> · Enter
                 confirma · Esc cancela
               </p>
-              {metodoActivo?.nombre === "Efectivo" &&
-                Number(montoTipeado) > restante + 0.001 && (
-                  <p className="text-[10px] text-sky-700 mt-1 text-right font-semibold">
-                    Vuelto estimado:{" "}
-                    <b>
-                      {formatearPrecio(
-                        redondear2(Number(montoTipeado) - restante),
-                      )}
-                    </b>
-                  </p>
-                )}
             </div>
           )}
 
