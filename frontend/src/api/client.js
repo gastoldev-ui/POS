@@ -30,16 +30,37 @@ async function post(path, body, opts = {}) {
   if (opts.imprimir === false) {
     headers["X-Skip-Print"] = "1";
   }
+
+  // Si body es FormData, dejamos que el browser ponga el Content-Type
+  // (con boundary) y NO mandamos el header manual.
+  const esFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
+  const headersFinal = esFormData ? undefined : headers;
+
   const res = await fetch(`${BASE}${path}`, {
     method: "POST",
-    headers,
-    body: JSON.stringify(body ?? {}),
+    headers: headersFinal,
+    body: esFormData ? body : JSON.stringify(body ?? {}),
   });
   return manejarRespuesta(res);
 }
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`);
+  return manejarRespuesta(res);
+}
+
+async function put(path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return manejarRespuesta(res);
+}
+
+async function del(path) {
+  const res = await fetch(`${BASE}${path}`, { method: "DELETE" });
   return manejarRespuesta(res);
 }
 
@@ -50,6 +71,7 @@ function conFecha(path, fecha) {
 }
 
 export const api = {
+  // ==================== POS (ventas, arqueo, tickets) ====================
   posVenta: (ticket, opts) => post("/pos/venta", ticket, opts),
   posCerrarCaja: (montoInicial, efectivoDeclarado) =>
     post("/pos/cerrar-caja", { montoInicial, efectivoDeclarado }),
@@ -57,4 +79,50 @@ export const api = {
   posResumenDia: (fecha) => get(conFecha("/pos/resumen-dia", fecha)),
   posSiguienteTicket: (fecha) => get(conFecha("/pos/siguiente-ticket", fecha)),
   posImprimir: (ticket) => post("/pos/imprimir", ticket),
+
+  // ==================== CATÁLOGO MAESTRO ====================
+  catalogoMaestroListar: (filtros = {}) => {
+    const params = new URLSearchParams();
+    if (filtros.q) params.set("q", filtros.q);
+    if (filtros.categoria) params.set("categoria", filtros.categoria);
+    if (filtros.activo !== undefined)
+      params.set("activo", String(filtros.activo));
+    const qs = params.toString();
+    return get(`/catalogo-maestro${qs ? `?${qs}` : ""}`);
+  },
+  catalogoMaestroGet: (sku) =>
+    get(`/catalogo-maestro/${encodeURIComponent(sku)}`),
+  catalogoMaestroCrear: (producto) => post("/catalogo-maestro", producto),
+  catalogoMaestroEditar: (sku, cambios) =>
+    put(`/catalogo-maestro/${encodeURIComponent(sku)}`, cambios),
+  catalogoMaestroEliminar: (sku) =>
+    del(`/catalogo-maestro/${encodeURIComponent(sku)}`),
+
+  // ==================== IMPORTAR EXCEL ====================
+  importarPreview: (file, headerRow = null) => {
+    const fd = new FormData();
+    fd.append("archivo", file);
+    if (headerRow !== null && headerRow !== undefined) {
+      fd.append("headerRow", String(headerRow));
+    }
+    return post("/importar/preview", fd);
+  },
+  importarConfirmar: (
+    file,
+    mapeo,
+    { headerRow = 0, importacionId = null } = {},
+  ) => {
+    const fd = new FormData();
+    fd.append("archivo", file);
+    fd.append("mapeo", JSON.stringify(mapeo));
+    fd.append("headerRow", String(headerRow));
+    if (importacionId) fd.append("importacionId", importacionId);
+    return post("/importar/confirmar", fd);
+  },
+  importarCampos: () => get("/importar/campos"),
+  importarMapeos: () => get("/importar/mapeos"),
+  importarImportaciones: () => get("/importar/importaciones"),
+  importarModelo: () => {
+    window.open(`${BASE}/importar/modelo`, "_blank");
+  },
 };

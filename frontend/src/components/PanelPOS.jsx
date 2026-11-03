@@ -1,7 +1,7 @@
 // src/components/PanelPOS.jsx
 import { usePOS } from "../context/POSContext";
 import { formatearPrecio } from "../utils/formateo";
-import { CATALOGO_MOCK } from "../mocks/catalogoMock";
+import { useCatalogoMaestro } from "../hooks/useCatalogoMaestro";
 import { usePOSAtajos } from "../hooks/usePOSAtajos";
 import { usePOSBusqueda } from "../hooks/usePOSBusqueda";
 import { usePOSCarga } from "../hooks/usePOSCarga";
@@ -30,7 +30,8 @@ export default function PanelPOS() {
     modalAbierto,
   });
 
-  const busqueda = usePOSBusqueda(CATALOGO_MOCK);
+  const catalogo = useCatalogoMaestro();
+  const busqueda = usePOSBusqueda(catalogo.productos);
   const carga = usePOSCarga({
     onProducto: (art, cantidad, precio) => {
       const filaVacia = pos.items.find((it) => it.vacia);
@@ -95,6 +96,35 @@ export default function PanelPOS() {
         onPrecioKeyDown={handlers.handlePrecioKeyDown}
         onSeleccionarProducto={handlers.seleccionarProducto}
       />
+      {catalogo.cargando && (
+        <div className="bg-indigo-50 border-b border-indigo-200 px-4 py-2 text-sm text-indigo-700 flex-shrink-0">
+          ⏳ Cargando catálogo...
+        </div>
+      )}
+
+      {catalogo.error && (
+        <div className="bg-red-50 border-b border-red-200 px-4 py-2 text-sm text-red-700 flex-shrink-0">
+          ⚠️ Error al cargar catálogo: {catalogo.error}
+          <button
+            onClick={() => catalogo.recargar()}
+            className="ml-2 underline font-semibold"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+
+      {!catalogo.cargando &&
+        !catalogo.error &&
+        catalogo.productos.length === 0 && (
+          <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-sm text-amber-800 flex-shrink-0">
+            📦 El catálogo está vacío. Importá un Excel desde{" "}
+            <a href="/admin" className="underline font-semibold">
+              el panel de administración
+            </a>{" "}
+            para empezar a vender.
+          </div>
+        )}
 
       <GrillaItems
         grillaRef={foco.refs.grilla}
