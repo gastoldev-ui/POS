@@ -18,15 +18,36 @@
 //   GET  /api/catalogo-maestro/importaciones
 
 import { Router } from "express";
+import multer from "multer";
 import {
   leerCatalogoMaestro,
+  guardarCatalogoMaestro,
   crearProducto,
   editarProducto,
   eliminarProducto,
+  eliminarProductoPermanente,
 } from "../services/catalogoMaestroService.js";
 import { listarImportaciones } from "../services/importacionService.js";
+import {
+  guardarImagen,
+  borrarArchivoImagen,
+  existeArchivoImagen,
+  normalizarListaImagenes,
+  MAX_IMAGENES,
+} from "../services/imagenesService.js";
 
 const router = Router();
+
+// Multer para imágenes: memory storage (no guardamos el original,
+// solo el archivo hasheado en data/pos/img/productos).
+const uploadImagen = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.fieldname === "archivo") return cb(null, true);
+    return cb(null, false);
+  },
+});
 
 // ==================== HELPERS ====================
 
@@ -99,6 +120,159 @@ router.get("/", (req, res) => {
   }
 });
 
+// ==================== POST /api/catalogo-maestro/:sku/imagenes ====================
+
+router.post(
+  "/:sku/imagenes",
+  uploadImagen.single("archivo"),
+  (req, res) => {
+    try {
+      const { sku } = req.params;
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Falta el archivo (campo "archivo")',
+        });
+      }
+
+      const maestro = leerCatalogoMaestro();
+      const idx = maestro.findIndex((p) => p.sku === sku);
+      if (idx === -1) {
+        return res.status(404).json({
+          success: false,
+          error: `Producto no encontrado: ${sku}`,
+        });
+      }
+
+      const existente = maestro[idx];
+      const imagenes = normalizarListaImagenes(existente);
+      if (imagenes.length >= MAX_IMAGENES) {
+        return res.status(400).json({
+          success: false,
+          error: `Límite de ${MAX_IMAGENES} imágenes por producto alcanzado.`,
+        });
+      }
+
+      const { archivo, bytes } = guardarImagen(req.file.buffer);
+
+      const nuevas = [
+        ...imagenes,
+        { archivo, alt: "", orden: imagenes.length },
+      ];
+
+      const actualizado = editarProducto(sku, { imagenes: nuevas });
+
+      return res.json({
+        success: true,
+        producto: actualizado,
+        imagen: { archivo, bytes },
+        mensaje: "Imagen subida correctamente.",
+      });
+    } catch (e) {
+      console.error(`❌ [CATALOGO-MAESTRO/${req.params.sku}/imagenes POST]`, e.message);
+      res.status(e.status || 500).json({ success: false, error: e.message });
+    }
+  },
+);
+
+// ==================== DELETE /api/catalogo-maestro/:sku/imagenes/:archivo ====================
+
+router.delete("/:sku/imagenes/:archivo", (req, res) => {
+  try {
+    const { sku, archivo } = req.params;
+    const archivoSeguro = decodeURIComponent(archivo);
+
+    const maestro = leerCatalogoMaestro();
+    const idx = maestro.findIndex((p) => p.sku === sku);
+    if (idx === -1) {
+      return res.status(404).json({
+        success: false,
+        error: `Producto no encontrado: ${sku}`,
+      });
+    }
+
+    const existente = maestro[idx];
+    const imagenes = normalizarListaImagenes(existente);
+
+    if (!imagenes.some((i) => i.archivo === archivoSeguro)) {
+      return res.status(404).json({
+        success: false,
+        error: `Imagen no encontrada: ${archivoSeguro}`,
+      });
+    }
+
+    borrarArchivoImagen(archivoSeguro);
+
+    const restantes = imagenes.filter((i) => i.archivo !== archivoSeguro);
+    const actualizado = editarProducto(sku, { imagenes: restantes });
+
+    return res.json({
+      success: true,
+      producto: actualizado,
+      mensaje: "Imagen eliminada.",
+    });
+  } catch (e) {
+    console.error(
+      `❌ [CATALOGO-MAESTRO/${req.params.sku}/imagenes DELETE]`,
+      e.message,
+    );
+    res.status(e.status || 500).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== PUT /api/catalogo-maestro/:sku/imagenes/orden ====================
+
+router.put("/:sku/imagenes/orden", (req, res) => {
+  try {
+    const { sku } = req.params;
+    const { orden } = req.body;
+
+    if (!Array.isArray(orden) || orden.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Falta el campo "orden" (array de archivos)',
+      });
+    }
+
+    const maestro = leerCatalogoMaestro();
+    const idx = maestro.findIndex((p) => p.sku === sku);
+    if (idx === -1) {
+      return res.status(404).json({
+        success: false,
+        error: `Producto no encontrado: ${sku}`,
+      });
+    }
+
+    const existente = maestro[idx];
+    const imagenes = normalizarListaImagenes(existente);
+
+    const archivosExistentes = new Set(imagenes.map((i) => i.archivo));
+    for (const archivo of orden) {
+      if (!archivosExistentes.has(archivo)) {
+        return res.status(404).json({
+          success: false,
+          error: `Archivo no válido en orden: ${archivo}`,
+        });
+      }
+    }
+
+    const reordenadas = imagenes
+      .filter((i) => orden.includes(i.archivo))
+      .sort((a, b) => orden.indexOf(a.archivo) - orden.indexOf(b.archivo));
+
+    const actualizado = editarProducto(sku, { imagenes: reordenadas });
+
+    return res.json({
+      success: true,
+      producto: actualizado,
+      mensaje: "Orden de imágenes actualizado.",
+    });
+  } catch (e) {
+    console.error(`❌ [CATALOGO-MAESTRO/${req.params.sku}/imagenes/orden PUT]`, e.message);
+    res.status(e.status || 500).json({ success: false, error: e.message });
+  }
+});
+
 // ==================== GET /api/catalogo-maestro/:sku ====================
 
 router.get("/:sku", (req, res) => {
@@ -158,6 +332,24 @@ router.delete("/:sku", (req, res) => {
     });
   } catch (e) {
     console.error(`❌ [CATALOGO-MAESTRO/DELETE ${req.params.sku}]`, e.message);
+    res.status(e.status || 400).json({ success: false, error: e.message });
+  }
+});
+
+// ==================== DELETE /api/catalogo-maestro/:sku/permanente ====================
+// Hard delete: borra físicamente el producto del JSON y sus imágenes del disco.
+
+router.delete("/:sku/permanente", (req, res) => {
+  try {
+    const resultado = eliminarProductoPermanente(req.params.sku);
+    res.json({
+      success: true,
+      sku: resultado.sku,
+      imagenesBorradas: resultado.imagenesBorradas,
+      mensaje: "Producto eliminado de forma permanente.",
+    });
+  } catch (e) {
+    console.error(`❌ [CATALOGO-MAESTRO/${req.params.sku}/permanente]`, e.message);
     res.status(e.status || 400).json({ success: false, error: e.message });
   }
 });

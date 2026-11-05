@@ -95,6 +95,8 @@ export const api = {
     put(`/catalogo-maestro/${encodeURIComponent(sku)}`, cambios),
   catalogoMaestroEliminar: (sku) =>
     del(`/catalogo-maestro/${encodeURIComponent(sku)}`),
+  catalogoMaestroEliminarPermanente: (sku) =>
+    del(`/catalogo-maestro/${encodeURIComponent(sku)}/permanente`),
   catalogoMaestroImportacionesLista: () =>
     get("/catalogo-maestro/importaciones/lista"),
 
@@ -125,4 +127,19 @@ export const api = {
   importarModelo: () => {
     window.open(`${BASE}/importar/modelo`, "_blank");
   },
+
+  // ==================== IMÁGENES DE PRODUCTO ====================
+  // Hasta 3 imágenes por producto, servidor guarda y sirve en /img/productos/<hash>.<ext>
+
+  imagenesSubir: (sku, file) => {
+    const fd = new FormData();
+    fd.append("archivo", file);
+    return post(`/catalogo-maestro/${encodeURIComponent(sku)}/imagenes`, fd);
+  },
+
+  imagenesBorrar: (sku, archivo) =>
+    del(`/catalogo-maestro/${encodeURIComponent(sku)}/imagenes/${encodeURIComponent(archivo)}`),
+
+  imagenesReordenar: (sku, orden) =>
+    put(`/catalogo-maestro/${encodeURIComponent(sku)}/imagenes/orden`, { orden }),
 };

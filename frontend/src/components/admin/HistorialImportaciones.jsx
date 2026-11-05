@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import * as api from "../../api/client";
+import { api } from "../../api/client";
 
 const fmtFecha = new Intl.DateTimeFormat("es-AR", {
   year: "numeric",

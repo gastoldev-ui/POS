@@ -10,6 +10,12 @@ export default defineConfig({
         target: 'http://localhost:4000',
         changeOrigin: true,
       },
+      // Imágenes locales del catálogo (backend/data/pos/img).
+      // Sin esto, /img/productos/<hash>.jpg lo pide a Vite (5174) y da 404.
+      '/img': {
+        target: 'http://localhost:4000',
+        changeOrigin: true,
+      },
     },
   },
 })

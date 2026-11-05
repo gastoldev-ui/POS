@@ -18,6 +18,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import {
+  normalizarListaImagenes,
+  urlDeImagen,
+  borrarArchivoImagen,
+  MAX_IMAGENES,
+} from "./imagenesService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -165,6 +171,8 @@ export function calcularPrecioVenta(costo, margen = 1.43) {
  * - Genera nombreCorto si falta.
  * - Calcula precioVenta si falta.
  * - Completa codigosBarras, editadoManualmente, origen.
+ * - Incluye uxB (unidades por bulto) con default 6.
+ * - Incluye precioBulto independiente (si no viene, lo calcula).
  * - NO toca campos existentes que ya estén definidos (respeta ediciones).
  *
  * @param {object} prod - Producto crudo (de Excel, migración, etc.)
@@ -191,6 +199,16 @@ export function normalizarProductoMaestro(prod, origen = {}, opts = {}) {
       ? precioVentaDefinido
       : calcularPrecioVenta(costoUnitario, margenDefault);
 
+  const uxB = Math.max(1, Math.floor(Number(prod.uxB) || 6));
+
+  // precioBulto: si viene definido y > 0, lo respetamos.
+  // Si no, lo calculamos (precioVenta * uxB).
+  const precioBultoDefinido = Number(prod.precioBulto);
+  const precioBulto =
+    Number.isFinite(precioBultoDefinido) && precioBultoDefinido > 0
+      ? precioBultoDefinido
+      : precioVenta * uxB;
+
   const margenDisplay =
     Number(prod.margenDisplay) ||
     (costoUnitario > 0
@@ -200,6 +218,14 @@ export function normalizarProductoMaestro(prod, origen = {}, opts = {}) {
   const codigosBarras = Array.isArray(prod.codigosBarras)
     ? prod.codigosBarras.filter(Boolean).map(String)
     : [sku].filter(Boolean);
+
+  // Imágenes: hasta MAX_IMAGENES por producto. Aceptamos tanto el formato
+  // nuevo (`imagenes`: array de {archivo, alt, orden}) como el viejo
+  // (`imagen`: string suelto) y lo normalizamos.
+  //
+  // `imagen` se mantiene como CAMPO DERIVADO = la principal (imagenes[0]).
+  // Eso preserva la compatibilidad con el POS, que ya lee `art.imagen`.
+  const imagenes = normalizarListaImagenes(prod);
 
   return {
     sku,
@@ -212,11 +238,16 @@ export function normalizarProductoMaestro(prod, origen = {}, opts = {}) {
     subcategoria: String(prod.subcategoria || "").trim(),
     codigosBarras,
     precioVenta,
+    // 👇 Campos nuevos/actualizados
+    precioBulto: Math.round(precioBulto * 100) / 100,
+    uxB,
+    // 👆
     costoUnitario,
     margenDisplay,
     stock: Math.max(0, Math.floor(Number(prod.stock) || 0)),
     activo: prod.activo !== false,
-    imagen: prod.imagen || null,
+    imagenes,
+    imagen: urlDeImagen(imagenes[0]) || null,
     origen: {
       tipo: origen.tipo || prod.origen?.tipo || "manual",
       importacionId:
@@ -228,6 +259,7 @@ export function normalizarProductoMaestro(prod, origen = {}, opts = {}) {
     editadoManualmente: {
       nombreCorto: Boolean(prod.editadoManualmente?.nombreCorto),
       precioVenta: Boolean(prod.editadoManualmente?.precioVenta),
+      precioBulto: Boolean(prod.editadoManualmente?.precioBulto),
       ...(prod.editadoManualmente || {}),
     },
     creadoEn: prod.creadoEn || ahora,
@@ -251,7 +283,26 @@ const CAMPOS_SIEMPRE_ACTUALIZA = [
 /**
  * Campos que respetan `editadoManualmente`. Si el dueño los tocó, NO se pisan.
  */
-const CAMPOS_RESPETAN_EDICION = ["nombreCorto", "precioVenta", "nombre", "marca", "categoria", "subcategoria"];
+const CAMPOS_RESPETAN_EDICION = [
+  "nombreCorto",
+  "precioVenta",
+  "precioBulto",
+  "nombre",
+  "marca",
+  "categoria",
+  "subcategoria",
+];
+
+/**
+ * Campos que el import de Excel NUNCA toca.
+ *
+ * `imagenes` / `imagen` van acá a propósito: las fotos se suben a mano
+ * desde el Admin. El Excel no trae archivos, así que si lo dejaramos
+ * pasar, cada import borraría las fotos ya cargadas.
+ * (El campo "URL Imagen" del Excel sigue funcionando para productos
+ * NUEVOS, vía normalizarProductoMaestro; lo que protegemos es el merge.)
+ */
+const CAMPOS_SOLO_MANUAL = ["imagenes", "imagen"];
 
 /**
  * Aplica el resultado de un import al catálogo maestro.
@@ -324,6 +375,13 @@ export function importarDesdeProveedor(importacionId, productosImport, opts = {}
     const editado = existente.editadoManualmente || {};
     const actualizado = { ...existente };
     let huboCambio = false;
+
+    // Las imágenes son SOLO manuales (se suben desde el Admin): el Excel
+    // nunca las pisa. Si no las protegiéramos, un import borraría las
+    // fotos ya cargadas (prodCrudo.imagen suele venir null).
+    for (const campo of CAMPOS_SOLO_MANUAL) {
+      if (campo in prodCrudo) delete prodCrudo[campo];
+    }
 
     for (const campo of CAMPOS_RESPETAN_EDICION) {
       // Si el dueño editó ESTE campo a mano → no pisar.
@@ -498,8 +556,11 @@ export function editarProducto(sku, cambios) {
     "categoria",
     "subcategoria",
     "precioVenta",
+    "precioBulto", // 👈 NUEVO
     "costoUnitario",
+    "uxB", // 👈 NUEVO
     "stock",
+    "imagenes",
     "imagen",
     "activo",
     "codigosBarras",
@@ -517,9 +578,30 @@ export function editarProducto(sku, cambios) {
       continue;
     }
 
+    // `imagenes` es la fuente de verdad; `imagen` (la principal) se deriva
+    // al final, cuando ya está normalizada la lista.
+    if (campo === "imagenes") {
+      actualizado.imagenes = normalizarListaImagenes({ imagenes: nuevo });
+      continue;
+    }
+
+    if (campo === "imagen") {
+      // Compatibilidad: si alguien manda `imagen` suelta, la tratamos como
+      // la principal de la lista.
+      if (typeof nuevo === "string" && nuevo.trim()) {
+        actualizado.imagenes = normalizarListaImagenes({ imagen: nuevo });
+      }
+      continue;
+    }
+
     if (campo === "stock") {
       actualizado.stock = Math.max(0, Math.floor(Number(nuevo) || 0));
       // stock no es "editable a mano" en el sentido de merge: se actualiza siempre
+      continue;
+    }
+
+    if (campo === "uxB") {
+      actualizado.uxB = Math.max(1, Math.floor(Number(nuevo) || 6));
       continue;
     }
 
@@ -537,6 +619,18 @@ export function editarProducto(sku, cambios) {
       }
       actualizado.precioVenta = Math.round(p * 100) / 100;
       editado.precioVenta = true;
+      continue;
+    }
+
+    if (campo === "precioBulto") {
+      const p = Number(nuevo);
+      if (!Number.isFinite(p) || p <= 0) {
+        const err = new Error("precioBulto inválido");
+        err.status = 400;
+        throw err;
+      }
+      actualizado.precioBulto = Math.round(p * 100) / 100;
+      editado.precioBulto = true;
       continue;
     }
 
@@ -564,6 +658,13 @@ export function editarProducto(sku, cambios) {
       Math.round((actualizado.precioVenta / actualizado.costoUnitario) * 100) /
       100;
   }
+
+  // `imagen` es derivado de `imagenes[0]`. Si no hay lista pero sí la
+  // imagen vieja (compatibilidad), migrarla.
+  if (!actualizado.imagenes || actualizado.imagenes.length === 0) {
+    actualizado.imagenes = normalizarListaImagenes({ imagen: actualizado.imagen });
+  }
+  actualizado.imagen = urlDeImagen(actualizado.imagenes[0]) || null;
 
   actualizado.editadoManualmente = editado;
   actualizado.actualizadoEn = ahoraISO();
@@ -602,6 +703,50 @@ export function eliminarProducto(sku) {
 
   guardarCatalogoMaestro(maestro);
   return maestro[idx];
+}
+
+/**
+ * Elimina un producto de forma permanente (hard delete).
+ * Borra la entrada del catálogo y también las imágenes asociadas del disco.
+ *
+ * @param {string} sku
+ * @returns {object} { sku, imagenesBorradas: string[] }
+ */
+export function eliminarProductoPermanente(sku) {
+  const clave = String(sku || "").trim();
+  if (!clave) throw new Error("eliminarProductoPermanente: falta sku");
+
+  const maestro = leerCatalogoMaestro();
+  const idx = maestro.findIndex((p) => p.sku === clave);
+  if (idx === -1) {
+    const err = new Error(`Producto no encontrado: ${clave}`);
+    err.status = 404;
+    throw err;
+  }
+
+  const producto = maestro[idx];
+
+  // Borrar imágenes asociadas del disco.
+  const imagenesBorradas = [];
+  const imagenes = Array.isArray(producto.imagenes) ? producto.imagenes : [];
+  for (const img of imagenes) {
+    const archivo = img.archivo || img;
+    if (borrarArchivoImagen(archivo)) {
+      imagenesBorradas.push(archivo);
+    }
+  }
+
+  // Quitar también la imagen principal si quedó suelta.
+  if (producto.imagen && borrarArchivoImagen(producto.imagen)) {
+    if (!imagenesBorradas.includes(producto.imagen)) {
+      imagenesBorradas.push(producto.imagen);
+    }
+  }
+
+  const siguiente = maestro.filter((p) => p.sku !== clave);
+  guardarCatalogoMaestro(siguiente);
+
+  return { sku: clave, imagenesBorradas };
 }
 
 // ==================== UTILIDADES PARA IMÁGENES ====================
